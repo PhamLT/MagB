@@ -1,0 +1,13 @@
+Actual Model parameters related to the synthetic anomaly examplegrid.grd
+------------------------------------------------------------------------
+IncF: 90
+DecF: -3
+
+IncM:90
+DecM:-3
+
+M=2 A/m
+
+Z0=10 KM
+
+
