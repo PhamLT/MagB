@@ -1,4 +1,4 @@
-Actual Model parameters related to the synthetic anomaly examplegrid.grd
+Actual Model parameters related to the synthetic anomaly example.grd
 ------------------------------------------------------------------------
 IncF: 90
 DecF: -3

@@ -1,119 +1,758 @@
-function MagB_inv 
+function MagB_inv
 clc;clear all;clear global;
 %Code by 
 %Oksum. E. : eroksum@gmail.com / erdincoksum@sdu.edu.tr
 %Pham L.T. : luanpt@hus.edu.vn
+%%%%%%%%%%%%%%%%%%%% Descriptions %%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%% INVERSION 
+     % 1- Import gridded data [2-D grid (*.grd) or columwise data X,Y,Z ]
+     %    by Import Data menu 
+     % 2- Set field parameters, filter parameters, termination criterion and maximum number
+     %    of iteration to related parts of table 
+     % 3- Start Iteration..
+     % Note: If Rms criterion is set to 0 then the divergence mode is 
+     % used for the inversion stopping, otherwise the convergence mode. 
+     % The user can set SH and WH parameters also interactively on raps
+     % plot (by clicking on Filter pushbutton) by moving the positions of 
+     % vertical lines assigning the limits of the roll-off frequencies..
+     %%%
+     % View Outputs : Basement depth, Inverted anomaly, Anomaly Difference, 
+     %                RMS plot 
+     %                (interactively selective by a listbox activated by 
+     %                mouse click on outputs GUI)
+     % View Options : 2D, 3D (only for depth model), 
+     %                Cross-Section (depth,observed and calculated anomalies)
+     % Export Outputs: Image file (*.png, 500 dpi resolution),
+     %                 Data file (maps-> *.grd, graphics-> *.dat)
+     %                 Export as project file (*mgb.mat). Project files
+     %                 can be loaded any time for re-view of interpretation
+     %
+%%%%%%%%% FORWARD CALCULATION
+     %    1- Activate Forward GUI by Forward-Calc menu at main GUI 
+     %    2- Import gridded depth data [2-D grid (*.grd)]
+     %       by Load Depth Grid  menu
+     %    3- Set field parameters by Settings & Calc menu
+     %       (after confirmation of inputs the code performs forward and
+     %        plots the calculated magnetic anomaly) 
+     %    4- Export as image file/data file by Save menu
+     %       [switch between depth/mag maps by Plot menu]
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%% Structure of main figure window
-%%%MainFig
+%%%%%%%%%%%%%%% Tasks of some main Functions
+%%% impgrd > NEW 2-D GRID and initialize/memorize parameters
+         %uses grd2loader,lodgrd6txt,lodgrd7bin
+%%% impgrdat> NEW XYZ GRID and initialize/memorize parameters
+         %uses lodgrdatfile_Callback
+%%% startiter > retrievs inputs from table, calls function maininv,
+%%%             memorize outputs
+%%% maininv > performs inversion sheme
+%%% getfreqs > calculates wavenumbers k, kx,ky
+%%% paddData > zero padding of data
+%%% filt_LP > lowpass 2-D filter design
+%%% raps_data > radially averaged spectrum
+%%% calcmag > retriev inputs, initialize parameters, calls forwardmag function
+%%%           memorize forward model
+%%% forwardmag > performs forward calculation of magnetic anomalies
+
+%%% please see Manual pdf file for the tasks of all functions used
+%%% in MagBinv code
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Creating the Structure of main figure window 
+createMainwindow 
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% IMPORT DATA MENU
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 1- NEW 2-D GRID 
+function impgrd(~,~)
+%imports a new 2-D grid, memorizes to temporary file, updates inputs table content.
+closwindows
+set(findobj(gcf,'Tag','mainfig'),'Pointer','watch')
+[sourcfil,T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy,errm]=grid2loader;
+if errm>0;
+if errm<5; errormess (errm);end
+set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow');
+return;
+end
+%%%%%%%set an initial value for sh and wh 
+setto=get(findobj(gcf,'Tag','tabl1'),'Data');
+sh_initial=0.1/dx;
+wh_initial=0.5*sh_initial;
+setto(7)=sh_initial;
+setto(8)=wh_initial;
+set(findobj(gcf,'Tag','tabl1'),'Data',setto);
+%%%%%%%
+[~,filnam] = fileparts(sourcfil);
+list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,sourcfil); % print statistics of data to listbox
+save('magbinv.mat','T','x','y','nx','ny','xmin','xmax','ymin','ymax','dx','dy',...
+    'filnam','-append'); % save/update variables of new input
+drawnow; mapper(x,y,T,'nT','Observed Anomaly',1); %% map the input grid
+%%% configure gui items 
+set(findobj(gcf,'Tag','startbut'),'Enable','on')
+set(findobj(gcf,'Tag','rpsbut'),'Enable','on','String','Filter')
+set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow')
+end
+
+function [sourcfil,matrix,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy,errm]=grid2loader
+%Checks format of 2-D grid input, searches for format errors
+errm=0;
+[filename, pathname] = uigetfile('*.grd', 'Import Golden Software Binary/Text grid (*.grd)');
+sourcfil=[pathname filename]; %%source to file
+if ischar(sourcfil)
+fidc=fopen(sourcfil);
+header= fread(fidc,4,'*char' )';
+fclose(fidc);
+c1=strcmp(header,'DSAA');
+c2=strcmp(header,'DSRB');
+sumc=sum([c1 c2]);
+if sumc>0
+switch c1
+    case 1
+[matrix,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd6txt(sourcfil);
+    case 0
+[matrix,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd7bin(sourcfil);        
+end
+if dx~=dy; errm=1;return;end
+if any(isnan(matrix(:))); errm=3;return;end
+else
+errm=2;matrix=0;x=0;y=0;nx=0;ny=0;xmin=0;xmax=0;ymin=0;ymax=0;dx=0;dy=0;
+end
+else
+errm=5;matrix=0;x=0;y=0;nx=0;ny=0;xmin=0;xmax=0;ymin=0;ymax=0;dx=0;dy=0;
+end
+end
+
+function [T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd6txt(sourcfil)
+% read Surfer 6 text grid(*.grd) format
+surfergrd=fopen(sourcfil,'r'); % Open grid file
+dsaa=fgetl(surfergrd);  % Header
+% Get the map dimension [NX: East NY: North];
+datasize=str2num(fgetl(surfergrd)); nx=datasize(1); ny=datasize(2);
+% Map limits: xmin, xmax, ymin ymax
+xcoor=str2num(fgetl(surfergrd)); xmin=xcoor(1); xmax=xcoor(2);
+ycoor=str2num(fgetl(surfergrd)); ymin=ycoor(1); ymax=ycoor(2);
+% check intervals in x and y direction 
+dx=(xmax-xmin)/(nx-1);dx=abs(dx);
+dy=(ymax-ymin)/(ny-1);dy=abs(dy);
+% data limits
+anom=str2num(fgetl(surfergrd)); t0min=anom(1); t0max=anom(2);
+% data matrix 
+[T,numb] = fscanf(surfergrd, '%f', [nx,ny]);
+T=T'; % Traspose matrix
+fclose(surfergrd);
+% map coordinate matrix
+[x,y]=meshgrid(xmin:dx:xmax,ymin:dy:ymax);
+end
+
+function [T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy] = lodgrd7bin(sourcfil)
+%read Surfer 7 Binary grid format
+fid= fopen(sourcfil);
+fread(fid,4,'*char' )';
+fread(fid,1,'uint32');fread(fid,1,'uint32');
+fread(fid,4,'*char' )';fread(fid,1,'uint32');
+ny= fread(fid,1,'uint32'); nx= fread(fid,1,'uint32');
+xmin= fread(fid,1,'double'); ymin= fread(fid,1,'double');
+dx= fread(fid,1,'double'); dy= fread(fid,1,'double');
+fread(fid,1,'double');fread(fid,1,'double');
+fread(fid,1,'double');
+parm= fread(fid,1,'double');
+fread(fid,4,'*char' )';
+nn= fread(fid,1,'uint32');
+if ny*nx ~= nn/8 ; error('error') ;end
+T= nan(nx,ny);
+T(1:end) = fread(fid,numel(T),'double');
+T=T';
+fclose(fid);
+T(T==parm) = nan;
+xv = xmin + (0:nx-1)*dx;
+yv = ymin + (0:ny-1)*dy;
+[x,y]=meshgrid(xv,yv);
+xmax=xv(end);
+ymax=yv(end);
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 2- NEW XYZ GRID
+function impgrdat(~,~)
+%imports new XYZ column data, memorizes to temporary file, updates inputs table content.
+[filename, pathname] = uigetfile({'*.dat'; '*.txt'; '*.csv'}, 'Import XYZ grid data');
+sourcfil=[pathname filename];
+if ischar(sourcfil)
+closwindows 
+set(findobj(gcf,'Tag','mainfig'),'Pointer','watch')
+[T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy,errm]=lodgrdatfile_Callback(sourcfil);
+if dx~=dy; errormess (1);return;end
+if errm==4; errormess (4);return;end
+%%%%%%%set an initial value for sh and wh 
+setto=get(findobj(gcf,'Tag','tabl1'),'Data');
+sh_initial=0.1/dx;    
+wh_initial=0.5*sh_initial;
+setto(7)=sh_initial;
+setto(8)=wh_initial;
+set(findobj(gcf,'Tag','tabl1'),'Data',setto);
+%%%%%%%
+[~,filnam] = fileparts(sourcfil);
+list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,sourcfil)% print statistics of data to listbox
+save('magbinv.mat','T','x','y','nx','ny','xmin','xmax','ymin','ymax','dx','dy',...
+    'filnam','-append'); %save/update variables of new input
+drawnow
+mapper(x,y,T,'nT','Observed Anomaly',1)% map the input data 
+%%% configure menu items 
+set(findobj(gcf,'Tag','startbut'),'Enable','on')
+set(findobj(gcf,'Tag','rpsbut'),'Enable','on','string','Filter')
+set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow')
+end
+end
+
+function [T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy,errm]=lodgrdatfile_Callback(sourcfil)
+%reads XYZ ascci format file (*.dat,*.txt,*.csv), searches for format errors
+data=load(sourcfil);
+x=data(:,1);y=data(:,2);T=data(:,3); 
+unix=unique(x);xmin=unix(1);xmax=unix(end);dx=unix(2)-unix(1);
+uniy=unique(y);ymin=uniy(1);ymax=uniy(end);dy=uniy(2)-uniy(1);
+nx=numel(unix);
+ny=numel(uniy);
+dxcount=numel(unique(diff(unix)));
+dycount=numel(unique(diff(uniy)));
+if sum([dxcount dycount])>2;errm=4;return;end;
+errm=0;
+if x(2)==x(1);
+T=reshape(T,ny,nx);
+x=reshape(x,ny,nx);
+y=reshape(y,ny,nx);
+else
+T=reshape(T,nx,ny);
+x=reshape(x,nx,ny);
+y=reshape(y,nx,ny);
+T=T';x=x';y=y';
+end
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 3- OPEN PROJECT
+function openproj(~,~)  
+%Re-loads a complete interpretation saved as a project file (matlab binary file). 
+[filename, pathname] = uigetfile('*_mgb.mat', 'Import MAGBinv Project file (*_mgb.)');
+k=[pathname filename];
+if ischar(k)
+%%%%%%%%%%%%%%%%%%%%%Get previous interpretation info    
+if exist('magbinv.mat','file')==2;delete('magbinv.mat');end
+copyfile(k,'magbinv.mat');
+load('magbinv.mat');
+list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,k);% retrieve data info
+set(findobj(gcf,'Tag','tabl1'),'Data',setto)%%%%retrieve table 1 info
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%Set Windows and mappings
+%%%%%%%%%%%%%%close existing open figures
+closwindows
+drawnow
+mapper(x,y,T,'nT','Observed Anomaly',1)
+set(findobj(gcf,'Tag','startbut'),'Enable','on')
+set(findobj(gcf,'Tag','rpsbut'),'Enable','on','string','Filter')
+%%%%%%%%%%%%%%%%%%%%
+%Re-open second window
+fig2 = createwindow2;
+drawnow
+createmenu2(fig2); %%% create menu items into window2
+mapper(x,y,-Zcalc,'Km','Calculated Depth',1)%% map the basement
+set(findobj(gcf,'Tag','tabl2'),'Data',[max(Zcalc(:)) min(Zcalc(:)) ...
+    mean(Zcalc(:)) numel(rmstor)])
+end
+end
+
+function impordep(~,~) 
+% IMPORT DEPTH MODEL GRID FOR FORWARD MAG 
+drawnow
+set(findobj(gcf,'Tag','Action'),'Pointer','watch')
+[~,z,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy,errm]=grid2loader;
+if errm>0;%pop up error messages 
+if errm<5; errormess (errm);end
+set(findobj(gcf,'Tag','Action'),'Pointer','arrow')
+return;
+end
+z=abs(z);
+defp = {'90';'0';'90';'0';'2';'10'};
+save('magbinvForw.mat','z','x','y','nx','ny','dx','dy','xmin','xmax',...
+    'ymin','ymax','defp');
+mapper(x,y,-z,'Km','Depth Model',1)
+set(findobj(gcf,'Tag','swiftm'),'Enable','off');
+set(findobj(gcf,'Tag','savf'),'Enable','off');
+set(findobj(gcf,'Tag','Action'),'Pointer','arrow')
+end
+
+function [If,Df,Im,Dm,M,z0,SH,WH,criterio,mxiter,alpha,itrmod]=get_parameters
+% reads inputs table content, initialize parameters.  
+setto=get(findobj(gcf,'Tag','tabl1'),'Data'); 
+If=setto(1)*pi/180;
+Df=setto(2)*pi/180;
+Im=setto(3)*pi/180;
+Dm=setto(4)*pi/180;
+M=setto(5);
+z0=setto(6);
+SH=setto(7);
+WH=setto(8);
+criterio=setto(9);
+mxiter=setto(10);
+alpha=0;
+if criterio==0; itrmod=1;else itrmod=0;end 
+save('magbinv.mat','setto','-append')
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%% START BUTTON AND INVERSION %%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function startiter(~,~) 
+% retrievs inputs from table content and temp. file, starts inversion procedure, 
+% memorizes outputs (basement, calculated magnetic anomaly, 
+% anomaly difference, rms variation)
+load('magbinv.mat','T','x','y','nx','ny','dx','dy');
+[If,Df,Im,Dm,M,z0,SH,WH,criterio,mxiter,alpha,itrmod]=get_parameters;
+if SH==0 || WH==0;msgbox({'please set filter configuration';...
+        'SH and WH >0'});return;end
+closwindows
+drawnow
+fig2=createwindow2;%%% Open a new figure window
+drawnow
+createmenu2(fig2); %%% create menu items into window2
+freqorder=sort([SH WH]);WH=freqorder(1);SH=freqorder(2);
+T0=T; % memorize orginal T 
+T=T./(10^9);
+%%%%%%%%%%Data padding
+[Te,nxe,nye]=paddData(nx,ny,T);
+nxm=2*nxe; nym=2*nye;
+%%%%%%%%%%%%%%%%%%%%%% get frequencies   
+[kx,ky,k]=getfreqs(nxm,nym,dx,dy);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%Call inversion sheme 
+[Zcalc,rmstor]=maininv(Te,kx,ky,k,nx,ny,nxe,nye,Im,Dm,If,Df,M,alpha,...
+                       z0,WH,SH,mxiter,itrmod,criterio);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%Calculate forward mag and mag difference between actual and calculated..
+z=Zcalc-z0; % extract mean depth
+[ze,nxe,nye]=paddData(nx,ny,z);
+Tcalc=forwardmag(ze,nx,ny,nxe,nye,kx,ky,k,M,Im,If,Dm,Df,alpha,z0);
+Tdiff=T0-Tcalc;
+%%%%%%%%%%%%%%%% Store outputs  
+save('magbinv.mat','Zcalc','Tcalc','Tdiff','rmstor','-append')
+set(findobj(gcf,'Tag','tabl2'),'Data',[max(Zcalc(:)) min(Zcalc(:)) ...
+    mean(Zcalc(:)) numel(rmstor)])
+drawnow
+mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
+end
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%% INVERSION PROCEDURE
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function [Zcalc,rmstor]=maininv(T,kx,ky,k,nx0,ny0,nxe,nye,Im,Dm,If,Df,M,alpha,...
+                       z0,WH,SH,mxiter,itrmod,criterio) 
+% performs the inversion procedure 
+cm=10^-7;
+[mx,my,mz,fx,fy,fz]=dircosin(Im,Dm,If,Df,alpha);% unit vectors
+thetam = mz+(1i).*((mx.*kx+my.*ky)./abs(k)); 
+thetaf=fz+(1i).*((fx.*kx+fy.*ky)./abs(k)); 
+hs=M*2.*pi.*cm.*thetam.*thetaf.*exp(-k.*z0).*k;
+%%%%%%%%%%%%%%%%%%%%Filter design
+dimk=size(k);
+filt_d=filt_LP(k,dimk(2),dimk(1),WH,SH);% filter cofficients
+%%%%%%%%%%%%%%%%%%%% Filter data and get the first approximation             
+FT=fft2(T);
+Fh=-FT./hs;
+Fh=Fh.*filt_d;
+Fh(1,1)=0;
+h=real(ifft2(Fh));
+h_old=h;%%%first approximation of depth
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%% Start of iterative procedure  
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+rms_old=1000;rmstor=1000;
+for istep=1:mxiter
+     m=istep+1;
+     Fh=Fh-((-k).^(m-1)).*fft2(h.^m)./factorial(m);
+     Fh=Fh.*filt_d;
+     h=real(ifft2(Fh)); %new h in istep 
+     dh=h-h_old; 
+     dh2=dh.^2;
+     rms=sqrt(sum(sum(dh2))./(numel(dh2(:)))); % new rms from new h
+ %%%case convergence mode
+ if itrmod==0; 
+     if rms<criterio;rmstor(istep)=rms;h_old=h;
+     instat(h_old,z0,nxe,nye,nx0,ny0,istep);% instant print to table 2 
+         break;
+     end;
+ end
+ %%%    
+ if rms>rms_old; break;end % new h is not suitable..use h_old of best approximation
+ rmstor(istep)=rms; %new rms is stored for next iteration
+ h_old=h; % new h is stored
+ rms_old=rms;
+ instat(h_old,z0,nxe,nye,nx0,ny0,istep)% instant print to table 2  
+ end
+%%%%%% End of Inversion sheme
+%%%%%%%%%%% Initialize output z
+z=h_old+z0;
+z=z(nye/2+1:nye/2+ny0,nxe/2+1:nxe/2+nx0);
+Zcalc=z; %calculated depth 
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%% CALC FUNCTIONS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function [T,nx,ny]=paddData(nx,ny,T) 
+% PADDING DATA
+T(1,nx+floor(nx/2))=0;
+T(ny+floor(ny/2),1)=0;
+T=rot90(rot90(T));
+T(1,nx+2*floor(nx/2))=0;
+T(ny+2*floor(ny/2),1)=0;
+T=rot90(rot90(T));
+if (mod(nx,2)~=0) nx=nx-1; T(:,end)=[]; end
+if (mod(ny,2)~=0) ny=ny-1; T(end,:)=[]; end
+end
+
+function [kx,ky,k]=getfreqs(nxm,nym,dx,dy) 
+% WAVENUMBERS
+dkx= 2.*pi./((nxm-1).*dx);
+dky= 2.*pi./((nym-1).*dy);
+nyqx= (nxm/2)+1;
+nyqy= (nym/2)+1; 
+[kx,ky]=meshgrid([(0:nxm/2) (nyqx+1:nxm)-(nxm+1)].*dkx,...
+    [((0:nym/2)) (nyqy+1:nym)-(nym+1)].*dky);
+k= sqrt(bsxfun(@plus,kx.^2,ky.^2));
+k(1,1)=0.00000001;
+end
+
+function [mx,my,mz,fx,fy,fz]=dircosin(Im,Dm,If,Df,alpha) 
+% calculates unit vectors of the magnetization and the ambient field
+mx=cos(Im)*sin(Dm-alpha);
+my=cos(Im)*cos(Dm-alpha);
+mz=sin(Im);
+fx=cos(If).*sin(Df-alpha);
+fy=cos(If).*cos(Df-alpha);
+fz=sin(If);
+end
+
+function filt_d=filt_LP(k,nxm,nym,WH,SH)
+% 2D filter design
+filt_d=zeros(nym,nxm); %% preallocating
+ktotal=k./(2*pi); 
+for j=1:nym;
+  for i=1:nxm;
+if ktotal(j,i)<WH
+      filt_d(j,i)=1;  
+elseif ktotal(j,i)<SH
+      filt_d(j,i)=0.5.*(1+cos((((2*pi)*ktotal(j,i))-(2*pi*WH))/(2*(SH-WH))));
+else
+filt_d(j,i)=0;
+end
+  end
+end
+end
+
+function Tcalc=forwardmag(z,nx0,ny0,nxe,nye,kx,ky,k,M,Im,If,Dm,Df,alpha,z0)
+% performs forward calculation of magnetic anomalies from gridded depth model
+order=10; 
+cm=10^-7; 
+[mx,my,mz,fx,fy,fz]=dircosin(Im,Dm,If,Df,alpha);
+thetam = mz+(1i).*((mx.*kx+my.*ky)./abs(k)); 
+thetaf=fz+(1i).*((fx.*kx+fy.*ky)./abs(k)); 
+hs=M*2.*pi.*cm.*thetam.*thetaf.*exp(-k.*z0);
+SumF=0;
+for m=1:order;
+SumF=SumF+((-k).^(m))./(factorial(m)).*fft2(z.^m);
+end;
+FT=hs.*SumF;
+T=(ifft2(FT));
+T=real(T);
+T=T.*10^9;
+Tcalc=T(nye/2+1:nye/2+ny0,nxe/2+1:nxe/2+nx0);
+end
+
+function calcmag(~,~)
+% retrievs inputs, initialize parameters, 
+% calls forwardmag function, memorize forward model
+prompt = {'Inc. angle of ambient field (Incf)?'; 'Dec. angle of ambient field (Df)?';...
+    'Inc. angle of magnetization(Im) ?'; 'Dec. angle of magnetization(Dm)?';...
+'Magnetization Contrast (M)?';
+'Average interface depth Z0 (unit in Km)?'};
+dlg_title = 'parameters';
+num_lines = 1;
+load('magbinvForw.mat');
+answer= inputdlg(prompt,dlg_title,num_lines,defp);
+if numel(answer)>0
+If=str2num(cell2mat(answer(1)))*pi/180;
+Df=str2num(cell2mat(answer(2)))*pi/180;
+Im=str2num(cell2mat(answer(3)))*pi/180;
+Dm=str2num(cell2mat(answer(4)))*pi/180;
+M=str2num(cell2mat(answer(5)));
+z0=abs(str2num(cell2mat(answer(6))));
+alpha=0;
+set(findobj(gcf,'Tag','Action'),'Pointer','watch')
+%%%%%%%%%%%%%%%%%%%%%padding depth data
+z=z-z0; % extract mean depth
+[ze,nxe,nye]=paddData(nx,ny,z);
+nxm=2*nxe; nym=2*nye;
+%%%%%%%%%%%%%%%%%%%%%% get frequencies   
+[kx,ky,k]=getfreqs(nxm,nym,dx,dy);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+Tcalc=forwardmag(ze,nx,ny,nxe,nye,kx,ky,k,M,Im,If,Dm,Df,alpha,z0);
+mapper(x,y,Tcalc,'nT','Calculated Anomaly From Depth Model',1)
+defp={num2str(If*180/pi);num2str(Df*180/pi);num2str(Im*180/pi);...
+    num2str(Dm*180/pi);num2str(M);num2str(z0)};
+save('magbinvForw.mat','Tcalc','defp','-append')
+set(findobj(gcf,'Tag','swiftm'),'Enable','on');
+set(findobj(gcf,'Tag','savf'),'Enable','on');
+set(findobj(gcf,'Tag','Action'),'Pointer','arrow')
+end
+end
+
+function [pwr,wn]= raps_data(T,dx) 
+% get radially averaged spectrum vs frequency 
+[ny,nx]=size(T); 
+nrow=2*floor(ny/2); ncol=2*floor(nx/2); 
+maxdim=max([nrow ncol]);
+np2=2^nextpow2(maxdim);  
+rowdiff=round((np2-nrow)/2); 
+coldiff=round((np2-ncol)/2);
+T=T(1:nrow,1:ncol);
+T=T-mean(T(:)); 
+wf=tukeywin(nrow,.05)*tukeywin(ncol,.05)'; %truncation window 5% from edges
+dw=T.*wf;
+TT=zeros(np2); 
+TT(rowdiff+1:rowdiff+nrow,coldiff+1:coldiff+ncol)=dw;  
+spec =(abs(fftshift(fft2(TT))));
+spec(spec<1.0e-13)=1.0e-13;
+spec=log(spec);
+% create cartesian coordinate system (unit) and
+% shifting the origin to zero frequency.
+[xo,yo]=meshgrid((1:np2)-np2/2,(1:np2)-np2/2); 
+[~,L]=cart2pol(xo,yo);L=round(L);% calculate distances to the center
+halfspec=(np2/2)-1; %considering the half of the spectrum
+wn=(1:halfspec)/(np2*dx); % freq axis
+for i=1:halfspec
+pwr(i)=mean(spec(L==i));%find data of equal distances and get mean  
+end
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%% PLOTTER FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function rmsplot(~,~) 
+% displays the rms variation obtained during the iteration steps. 
+load('magbinv.mat','rmstor');
+plot(rmstor,'-ko','MarkerFaceColor','r','MarkerSize',5);
+set(gca,'FontSize',10,'FontWeight','bold')
+sent1=['RMS(1)=' num2str(rmstor(1))];
+sent2=['RMS(end)=' num2str(rmstor(end))];
+title ({'RMS-Graph'; [sent1 '    ' sent2]})
+xlabel('iteration step');ylabel('RMS');
+xlim([1 numel(rmstor)])
+      grid on
+      pbaspect([1 1 1]);axis square
+rotate3d off
+set(findobj(gcf,'Tag','uyari'),'string',...
+'Click on screen to switch between output maps','ForeGroundColor','b')
+set(findobj(gcf,'Tag','plc1'),'enable','off')% set buttons enable or dissable
+set(findobj(gcf,'Tag','plc2'),'enable','off')%
+set(findobj(gcf,'Tag','plc3'),'enable','off')%
+set(findobj(gcf,'Tag','plc4'),'enable','off')%
+end
+
+function mapper(x,y,matrix,unitt,tit,index) 
+% displays  a color filled contour map of gridded data
+if index==1;
+contourf(x,y,matrix,18);shading flat;
+rotate3d off;
+end
+set(gca,'FontSize',10,'FontWeight','bold')
+h=colorbar('eastoutside');title(h,unitt,'FontWeight','bold');
+set(h,'FontSize',10,'FontWeight','bold')
+xlabel('X (Km)');ylabel('Y (Km)');title(tit)
+axis equal
+axis tight
+end
+
+function map3v(x,y,z,tit) 
+% displays  3D contour map of basement depth.
+surf(x,y,z,'FaceColor','interp','EdgeColor','none')
+rotate3d on
+title(tit)
+box on
+pbaspect([1 1 .5])
+end
+
+function plotcross(PROFX,TC,TCC,ZC) 
+% plots cross-section data of observed and calculated anomalies 
+% and basement relief
+fig3 = figure('MenuBar','none','Name','Cross-Section',...
+'NumberTitle','off','Resize','off',...
+'Color','w',...
+'units','normalized','outerposition',[0 .1 .49 .9],...
+'DockControls','off','WindowButtonDownFcn',@posfig1);
+ax1=axes('Parent',fig3,'units','normalized','Position',[0.1 0.6 0.8 0.35]);
+axis off
+ax2=axes('Parent',fig3,'units','normalized','Position',[0.1 0.1 0.8 0.35]);
+axis off
+uimenu('Parent',fig3,'Label','Export Profile Data','CallBack',@savcross);
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+axes(ax1)
+plot(PROFX,TC,'+r',PROFX,TCC,'-k','linewidth',1);grid on;box on;
+xlim([min(PROFX) max(PROFX)]);ylabel('nT');
+legend('Observed','Calculated');
+%%%%%%%%%%%%%%%
+axes(ax2)
+dfz=max(ZC)+(max(ZC)/5);
+ZC(end+1:end+3)=[dfz dfz ZC(1)]; 
+PROFX(end+1:end+3)=[PROFX(end) PROFX(1) PROFX(1)];
+plot(PROFX(1:end-3),-ZC(1:end-3),'-k','linewidth',2);
+patch(PROFX,-ZC,[.1 .1 .1],'FaceAlpha',.8);
+ylabel('Depth (Km)')
+xlabel('Distance (Km)')
+xlim([min(PROFX) max(PROFX)]);
+ylim([min(-ZC) 0]);
+box on
+grid on
+end
+
+function rapsplot(src,~)
+% plots the radially averaged spectrum of input data and two vertical lines 
+% (in blue) indicating the current roll-off frequencies 
+% of the filter design (SH and Wh).
+sourL=get(src,'string');
+  switch sourL
+    case 'Filter' 
+load('magbinv.mat','T','dx');
+setto=get(findobj(gcf,'Tag','tabl1'),'Data');
+[pwr,wn]= raps_data(T,dx); %get radially averaged spectrum
+plot(wn,pwr,'k','LineWidth',2);
+line([setto(7) setto(7)],[min(pwr) max(pwr)],'Color','b','LineStyle','--','LineWidth',3,...
+     'ButtonDownFcn',@setLin,'Tag','L1')
+line([setto(8) setto(8)],[min(pwr) max(pwr)],'Color','b','LineStyle','--','LineWidth',3,...
+     'ButtonDownFcn',@setLin,'Tag','L2')
+pbaspect([1 1 1])
+grid on
+title ({'Radially Averaged Pow-Spectrum Graph';...
+'Set SH and WH frequency band array for lowpass filtering'})
+xlabel('k/2*pi');ylabel('Log(P)');
+set(src,'string','Observed Anomaly');
+    case 'Observed Anomaly'
+    load('magbinv.mat','x','y','T')
+    mapper(x,y,T,'nT','Observed Mag.',1)
+    set(src,'string','Filter');
+   end
+end
+
+function setLin(src,~)
+% enables the user to set the frequency band array (SW-WH) interactively 
+% by mouse control
+set(src,'Color',[.5 .5 .5])
+new_p=ginput(1);
+if new_p(1)<0;new_p(1)=0.01;end
+set(src,'XData',[new_p(1) new_p(1)],'Color','b')
+get_SHWH
+end
+
+function get_SHWH
+% updates the cells related to SH and WH in inputs table according 
+% the interactive selection of these parameters on raps plot
+setto=get(findobj(gcf,'Tag','tabl1'),'Data');
+Lx1 = get(findobj(gcf,'Tag','L1'), 'XData');
+Lx2 = get(findobj(gcf,'Tag','L2'), 'XData');
+whsh=unique([Lx1 Lx2]);
+setto(8)=whsh(1);
+setto(7)=whsh(2);
+set(findobj(gcf,'Tag','tabl1'),'Data',setto);
+xlabel(['SH = ' num2str(setto(7)) '    WH = ' num2str(setto(8))])
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%% GUI WINDOW MANAGERS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function posfig1(~,~) 
+% reset position of GUI-1
+set(gcf,'outerposition',[0 .1 .49 .9])
+end
+
+function fig2=createwindow2  
+% create empty secondary figure window
+fig2=figure('MenuBar','none','Name','Action',...
+'NumberTitle','off','Resize','off',...
+'Color','w',...
+'units','normalized','outerposition',[.5 .1 .49 .9],...
+'DockControls','off');
+end
+
+function createMainwindow   
+% create Main gui window
 fig1 = figure('MenuBar','none','Name','MagB_inv',...
 'NumberTitle','off','Resize','off',...
 'Tag','mainfig','Color','w',...
 'units','normalized','outerposition',[0 .1 .49 .9],...
 'DockControls','off','WindowButtonDownFcn',@posfig1);
 s1='MagB_inv : Magnetic basement estimation';
-s3='2019';
+s2='2019/9';
 uicontrol('Parent',fig1,'Style','text','units','normalized','Position',...
 [0.65 0.91 0.33 0.08],'FontWeight','normal','HorizontalAlignment','center',...
 'BackGroundColor','w','ForeGroundColor',[.2 .2 .2],...
-'string',{s1;s3})
-%%%% Menu items
+'string',{s1;s2})
+%%%% Create Menu items...
 %%%% Import Data
 menu1 = uimenu('Parent',fig1,'Label','IMPORT DATA'); 
 uimenu('Parent',menu1,'Label','New 2-D Grid (*.grd)','CallBack',@impgrd);
-uimenu('Parent',menu1,'Label','New XYZ grid (*.dat)','CallBack',@impgrdat);
+uimenu('Parent',menu1,'Label','New XYZ grid (*.dat, *.txt, *.csv)','CallBack',@impgrdat);
 uimenu('Parent',menu1,'Label','OPEN MAGBinv Project','CallBack',@openproj);
-uimenu('Parent',fig1,'Label','Forward-Calc','CallBack',@createAnom);
-%%%%%%%%%%%%%%%%%
+uimenu('Parent',fig1,'Label','Forward-Calc','CallBack',@createFWgui);
+%%%% Add a listbox for Grid info 
 uicontrol('Parent',fig1,'Style','listbox','units','normalized','Position',[.02,.9,.6,.09],...
 'String',{'Grid Info:'},'Tag','listb1','BackGroundColor','w')
-%%%%%% Create an Axis 
+%%% Create an Axis for plotting of the input map 
 axes('Parent',fig1,'units','normalized','Position',...
-    [0.15 0.02 0.75 0.75],'Tag','axsig');
+    [0.2 0.1 0.6 0.6],'Tag','axsig');
 axis off
+%%% Create a table for parameter inputs
 tbl1=uitable('Parent',fig1,'units','normalized','Position',[.02,.79,.97,.11],...
-'ColumnName',{'IncF','DecF','IncM','DecM','M','AvgZo','DVRG','CNVG','Maxiter'},...
+'ColumnName',{'IncF','DecF','IncM','DecM','M','AvgZo','SH','WH','RMS crit.','Maxiter'},...
 'Tag','tabl1','Rowname',{'Parameter'},...
-'ColumnWidth',{55,55,55,55,55,85,55,55,55},...
-'Enable','off');
-c = uicontextmenu;
-uicontrol(fig1,'UIContextMenu',c,'string','Initial-Settings (right click for update)',...
-'units','normalized','ForeGroundColor','b',...
-'Position',[.022,.795,.45,.04],'Tag','setto');
-c1=uimenu('Parent',c,'Label','Set Initial Parameters','Tag','c1',...
-    'Separator','on','Callback',@setact1,'Separator','on');
-c2=uimenu('Parent',c,'Label','Set Iteration-Stop','Checked','on','Separator','on');
-uimenu('Parent',c2,'Label','RMS Divergence (RMS(i+1)>RMS(i))','Checked','on','Tag','c21',...
-    'Callback',@setact1,'Separator','on');
-uimenu('Parent',c2,'Label','RMS Convergence (RMS<threshold)','Tag','c22',...
-    'Callback',@setact1,'Separator','on');
-uimenu('Parent',c2,'Label','MaxIter','Checked','on','Tag','c23',...
-    'Callback',@setact1,'Separator','on');
-c3=uimenu('Parent',c,'Label','Filter Observed Grid','Tag','c3',...
-'Separator','on','Enable','off','ForeGroundColor','b','Callback',@setact1);
+'ColumnWidth',{40,40,40,40,30,80,70,70,70,50},'ColumnEditable',true,...
+'CellEditCallback',@tbl_selectshwh);
 uicontrol('Parent',fig1,'Style','pushbutton','units','normalized',...
 'Position',[.7,.795,.28,.04],...
 'String','Start Iteration','Tag','startbut','ForeGroundColor','b',...
 'FontWeight','bold','CallBack',@startiter,'enable','off')
-%%%%%%%%%%%%%%%%% Default Settings
-if exist('magbinvset.mat','file')==2;
-a=load('magbinvset.mat');
-set(tbl1,'Data',a.setto);
-if a.setto(7)==0;set(findobj(gcf,'Tag','c21'),'Checked','off');
-set(findobj(gcf,'Tag','c22'),'Checked','on');end
-else
-setto=[90 0 90 0 2 15 1 0 20]; %default settings
-save('magbinvset.mat','setto');
-set(tbl1,'Data',setto);
-%fileattrib('magbinvset.mat','+h');%hidden temporary import info file
-end
-%%%%%%%%%%%%%%%%%
+uicontrol('Parent',fig1,'Style','pushbutton','units','normalized',...
+'Position',[.03,.795,.2,.04],...
+'String','Filter','Tag','rpsbut','ForeGroundColor','k',...
+'FontWeight','bold','CallBack',@rapsplot,'enable','off')
 text(.30,.0,'MagB_ inv','FontWeight','bold','FontSize',20,'Color',[.75 .75 .75])
 axis off
+%%%%%%%%%%%%%%%%% Load Settings from magbinv.mat (if exists)
+%%%% otherwise print table with default values and create a magbinv.mat file
+%%%% to store in use for next run of code....
+if exist('magbinv.mat','file')==2;
+load('magbinv.mat','setto');
+    if numel(setto)==10;
+    set(tbl1,'Data',setto);
+    else setto=[90 0 90 0 2 10 0.06 0.03 10^(-4) 20];
+        save('magbinv.mat','setto');
+        set(tbl1,'Data',setto);
+    end
+else
+setto=[90 0 90 0 2 10 0.06 0.03 10^(-4) 20]; %default settings 
+%%%=[IncF,DecF,IncM,DecM,M,AvgZo,SH,WH,DVRG,CNVG,Maxiter]
+save('magbinv.mat','setto');
+set(tbl1,'Data',setto);
 end
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% FUNCTIONS
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function openproj(src,event)   %%%Retriev a Magbinv project
-clc;clear all;clear global;
-[filename, pathname] = uigetfile('*_mgb.mat', 'Import MAGBinv Project file (*_mgb.)');
-k=[pathname filename];
-if ischar(k)
-set(findobj(gcf,'Tag','mainfig'),'Pointer','watch')    
-%%%%%%%%%%%%%%%%%%%%%Get previous interpretation info    
-if exist('magbinv.mat','file')==2;delete('magbinv.mat');end
-if exist('magbinvset.mat','file')==2;delete('magbinvset.mat');end
-copyfile(k,'magbinv.mat');
-load('magbinv.mat');
-list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,k);% retrieve data info
-set(findobj(gcf,'Tag','tabl1'),'Data',setto)%%%%retrieve table 1 info
-save('magbinvset.mat','setto')
-set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow')
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%Set Windows and mappings
-%%%%%%%%%%%%%%close existing open figures
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-figure3 = findobj('Type','figure','name','Cross-Section');
-delete (figure3);
-drawnow
-mapper(x,y,T,'nT','Observed Anomaly',1)
-set(findobj(gcf,'Tag','c3'),'Enable','on')
-set(findobj(gcf,'Tag','startbut'),'Enable','on')
-%%%%%%%%%%%%%%%%%%%%
-if SH==0 || WH==0;msgbox({'please set filter configuration';...
-'SH and WH >0'}); setfilters;return;end
-%Secondfig
-fig2 = figure('MenuBar','none','Name','Action',...
- 'NumberTitle','off','Resize','off',...
- 'Color','w',...
- 'units','normalized','outerposition',[.5 .1 .49 .9],...
- 'DockControls','off');
- set(fig2,'WindowButtonDownFcn', @selectoutmap)
- axes('Parent',fig2,'units','normalized','Position',[0.15 0.02 0.75 0.75]);
- axis off
-psbut=uicontrol(fig2,'Style','pushbutton','units','normalized',...
-'BackGroundColor',[.8 .8 .8],'HorizontalAlignment','right',...
-'Position',[0 .95 1 0.03],'String','RMS Plot','Callback',@rmsplot);
-mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
+end
+
+function tbl_selectshwh(~,event)
+% updates the positions of the vertical lines related to the roll-off 
+% frequencies SH and Wh in raps plot according the manual input in inputs table
+if event.Indices(2)==7 || event.Indices(2)==8
+setto=get(findobj(gcf,'Tag','tabl1'),'Data');
+set(findobj(gcf,'Tag','L1'), 'XData',[setto(7) setto(7)]);
+set(findobj(gcf,'Tag','L2'), 'XData',[setto(8) setto(8)]); 
+ordershwh=unique([setto(7) setto(8)]);
+setto(7:8)=fliplr(ordershwh);
+set(findobj(gcf,'Tag','tabl1'),'Data',setto);
+xlabel(['SH = ' num2str(setto(7)) '    WH = ' num2str(setto(8))])
+end    
+end
+
+
+function createmenu2(fig2) 
+% CREATE GUI-2 OUTPUTS WINDOW
+set(fig2,'WindowButtonDownFcn', @selectoutmap)
+axes('Parent',fig2,'units','normalized','Position',[0.15 0.02 0.75 0.75]);
+axis off
 menu1 = uimenu('Parent',fig2,'Label','SAVE/Export'); 
 uimenu('Parent',menu1,'Label','Save as MAGBinv Project (*mat)','CallBack',@savbut);
 menu2=uimenu('Parent',menu1,'Label','Export');
@@ -123,79 +762,11 @@ uimenu('Parent',menu2,'Label','Calc-T grid (*.grd)','CallBack',@savbut);
 uimenu('Parent',menu2,'Label','Diff. (T-CalcT) grid (*.grd)','CallBack',@savbut);
 uimenu('Parent',menu2,'Label','Export All','CallBack',@savbut);
 uimenu('Parent',fig2,'Label','Save Plots as Images','CallBack',@savbut);
-maxd=max(max(Zcalc));
- mind=min(min(Zcalc));
- meand=mean(mean(Zcalc));
- rs=numel(rmstor);
- uitable('Parent',fig2,'units','normalized','Position',[.02,.87,.97,.07],...
- 'ColumnName',{'Max Depth','Min Depth','Mean Depth','Iteration Step'},...
- 'Rowname',{'STAT'},...
- 'ColumnWidth',{100,100,100,100},...
- 'Enable','off','Data',[maxd mind meand rs]);
- uicontrol('Parent',fig2,'Style','text','units','normalized',...
- 'Position',[.02,.81,.4,.04],'String','Click on screen to switch between output maps',...
- 'BackGroundColor','w','ForeGroundColor','b','Tag','uyari',...
- 'HorizontalAlignment','left')
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.85,.83,.13,.03],'String','Color-Map','Tag','plc1',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.71,.83,.13,.03],'String','View-3','Tag','plc2',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.55,.83,.15,.03],'String','View-2 (default)','Tag','plc3',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.8,.88,.18,.05],'String','Cross-Section','Tag','plc4',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
-end
-end
-
-function posfig1(src,event)  % reset position of GUI
-set(gcf,'outerposition',[0 .1 .49 .9])
-end
-
-function startiter(src,event) % start iterative procedure and create output GUI
-load('magbinv.mat','SH','WH');
-if SH==0 || WH==0;msgbox({'please set filter configuration';...
-        'SH and WH >0'}); setfilters;return;end
-setto=get(findobj(gcf,'Tag','tabl1'),'Data');
-%%%Secondfig
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-fig2 = figure('MenuBar','none','Name','Action',...
-'NumberTitle','off','Resize','off',...
-'Color','w',...
-'units','normalized','outerposition',[.5 .1 .49 .9],...
-'DockControls','off');
-set(fig2,'WindowButtonDownFcn', @selectoutmap)
-axes('Parent',fig2,'units','normalized','Position',[0.15 0.02 0.75 0.75]);
-axis off
-pause(1);
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%CALL MAIN Inversion
-maininv(setto,fig2);
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-menu1 = uimenu('Parent',fig2,'Label','SAVE/Export'); 
-uimenu('Parent',menu1,'Label','Save as MAGBinv Project (*mat)','CallBack',@savbut);
-menu2=uimenu('Parent',menu1,'Label','Export');
-uimenu('Parent',menu2,'Label','RMS List (*.dat)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Calc-Z grid (*.grd)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Calc-T grid (*.grd)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Diff. (T-CalcT) grid (*.grd)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Export All','CallBack',@savbut);
-menu2 = uimenu('Parent',fig2,'Label','Save Plots as Images','CallBack',@savbut);
-load('magbinv.mat','Zcalc','Tdiff','rmstor');
-maxd=max(max(Zcalc));
-mind=min(min(Zcalc));
-meand=mean(mean(Zcalc));
-rs=numel(rmstor);
-tbl2=uitable('Parent',fig2,'units','normalized','Position',[.02,.87,.97,.07],...
+uitable('Parent',fig2,'units','normalized','Position',[.02,.87,.97,.07],...
 'ColumnName',{'Max Depth','Min Depth','Mean Depth','Iteration Step'},...
 'Rowname',{'STAT'},...
 'ColumnWidth',{100,100,100,100},...
-'Enable','off','Data',[maxd mind meand rs]);
+'Enable','off','Data',[0 0 0 0],'Tag','tabl2');
 uicontrol('Parent',fig2,'Style','text','units','normalized',...
 'Position',[.02,.81,.4,.04],'String','Click on screen to switch between output maps',...
 'BackGroundColor','w','ForeGroundColor','b','Tag','uyari',...
@@ -214,9 +785,154 @@ uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
 'ForeGroundColor','k','CallBack',@plotcontrol)
 end
 
-function plotcontrol(src,event) % manage output plots
-nedir=get(src,'String');
-switch nedir
+function createFWgui (~,~)
+% creates menu items related to forward-calc procedure
+closwindows
+fig2 = createwindow2;
+uimenu('Parent',fig2,'Label','Load Depth Grid','CallBack',@impordep);
+uimenu('Parent',fig2,'Label','Settings & Calc','CallBack',@calcmag);
+sm=uimenu('Parent',fig2,'Label','Plot','Tag','swiftm','Enable','off');
+uimenu('Parent',sm,'Label','Depth Model','CallBack',@switcmap);
+uimenu('Parent',sm,'Label','Calc-Mag','CallBack',@switcmap);
+savf=uimenu('Parent',fig2,'Label','Save','Tag','savf','Enable','off');
+uimenu('Parent',savf,'Label','Get Screen as Image File(*.png)','CallBack',@saveforward);
+uimenu('Parent',savf,'Label','Save Mag-Data File (*.grd)','CallBack',@saveforward);
+axes('Parent',fig2,'units','normalized','Position',[0.15 0.1 0.75 0.75]);
+axis off
+end
+
+function expofig (~,~)
+% creates a GUI for taking screen shots of desired output plots.
+closwindows
+fig2 = createwindow2;
+uimenu('Parent',fig2,'Label','PRINT','CallBack',@ploprint);
+uimenu('Parent',fig2,'Label','RETURN','CallBack',@return2menu2);
+set(fig2,'WindowButtonDownFcn', @selectoutmapimag)
+axes('Parent',fig2,'units','normalized','Position',[0.15 0.1 0.75 0.75]);
+text(0.2,0.6,{'1. Click on screen to select an output map/graphic';...
+              '2. Use Print menu to save as image file...'})
+axis off
+end
+
+function selectoutmap(~,~) 
+% displays a dialog box for selecting the desired output to plot.  
+set(gcf,'outerposition',[.5 .1 .49 .9])
+str = {'Basement Depth';'Inverted Anomaly';'Anomaly Difference';
+    'RMS Plot'};
+      [s,v] = listdlg('PromptString','Select Output Map:',...
+                      'SelectionMode','single',...
+                      'ListString',str,'ListSize',[160 80]);
+
+load('magbinv.mat','x','y','Tcalc','Zcalc','Tdiff');
+ if v==1;    
+  switch s
+      case 1
+      mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
+      set(findobj(gcf,'Tag','plc1'),'enable','on')
+      set(findobj(gcf,'Tag','plc2'),'enable','on')
+      set(findobj(gcf,'Tag','plc3'),'enable','on')
+      set(findobj(gcf,'Tag','plc4'),'enable','on')
+      case 2
+      mapper(x,y,Tcalc,'nT','Calculated Mag.',1)
+      set(findobj(gcf,'Tag','plc1'),'enable','on')
+      set(findobj(gcf,'Tag','plc2'),'enable','off')
+      set(findobj(gcf,'Tag','plc3'),'enable','off')
+      set(findobj(gcf,'Tag','plc4'),'enable','on')
+      case 3
+      mapper(x,y,Tdiff,'nT','Anomaly Difference',1)
+      set(findobj(gcf,'Tag','plc1'),'enable','on')
+      set(findobj(gcf,'Tag','plc2'),'enable','off')
+      set(findobj(gcf,'Tag','plc3'),'enable','off')
+      set(findobj(gcf,'Tag','plc4'),'enable','on')
+      case 4
+      rmsplot
+      
+  end
+ end
+                  
+end
+
+function selectoutmapimag(~,~) 
+% displays a dialog box for selecting the desired output to save as an image (screen shot).
+set(gcf,'outerposition',[.5 .1 .49 .9])
+str = {'Basement Depth';'Inverted Anomaly';'Anomaly Difference';
+    'RMS Plot';'Observed Anomaly'};
+      [s,v] = listdlg('PromptString','Select Output Map:',...
+                      'SelectionMode','single',...
+                      'ListString',str,'ListSize',[200 120]);
+load('magbinv.mat','x','y','T','Tcalc','Zcalc','Tdiff','rmstor');
+ if v==1;    
+  switch s
+      case 1
+      mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
+      case 2
+      mapper(x,y,Tcalc,'nT','Calculated Mag.',1)
+      case 3
+      mapper(x,y,Tdiff,'nT','Anomaly Difference',1)
+      case 4
+      plot(rmstor,'-ko','MarkerFaceColor','r','MarkerSize',5);
+      set(gca,'FontSize',10,'FontWeight','bold')
+      sent1=['RMS(1)=' num2str(rmstor(1))];
+      sent2=['RMS(end)=' num2str(rmstor(end))];
+      title ({'RMS-Graph'; [sent1 '    ' sent2]})
+      xlabel('Iteration number');ylabel('RMS');
+      xlim([1 numel(rmstor)])
+      grid on
+      pbaspect([1 1 1]);axis square
+      case 5
+      mapper(x,y,T,'nT','Observed Mag.',1)
+  end
+ end
+end
+
+function return2menu2(~,~) 
+% closes GUI created by expofig and returns to GUI created by createmenu2
+clc;clear all;clear global;
+load('magbinv.mat','Zcalc','rmstor');
+%%%%%%%%%%%%%%close existing open figures
+closwindows
+%%%%%%%%%%%%%%%%%%%%
+%return to Second window
+fig2 = createwindow2;
+drawnow
+createmenu2(fig2)
+set(findobj(gcf,'Tag','tabl2'),'Data',[max(Zcalc(:)) min(Zcalc(:)) ...
+mean(Zcalc(:)) numel(rmstor)])
+end
+
+function closwindows 
+% closes all windows opened (except the main GUI)
+delete(findobj('Type','figure','name','Action'));
+delete(findobj('Type','figure','name','Cross-Section'));
+delete(findobj('Type','figure','name','err-m'));
+end
+
+function errormess (e) 
+% displays an error message window explaining the kind of error.  
+set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow')    
+figure('MenuBar','none','Name','err-m',...
+'NumberTitle','off','Resize','off',...
+'Color','k',...
+'units','normalized','outerposition',[0.05 .8 .4 .1],...
+'DockControls','off');
+switch e
+    case 1
+text(0.2,.5,'equal spaced grid dx=dy is required..','Color','w')
+    case 2
+text(0,.5,'File format not supported..Load Surfer 6 text grid / Surfer 7 Binary Grid','Color','w')
+    case 3
+text(0.3,.5,'Blanked grid not supported..','Color','w')
+    case 4
+text(0.1,.5,'XYZ data input is not equal spaced..(check intervals of X or Y colums)','Color','w')
+end
+axis off
+end
+
+function plotcontrol(src,~) 
+% checks and directs to the plot style that user has selected  
+% (2D, 3D, cross-section). 
+srclabel=get(src,'String');
+switch srclabel
     case 'Color-Map'
         colormapeditor
     case 'View-3'
@@ -245,7 +961,29 @@ switch nedir
 end
 end
 
-function getcross % extract profile data
+function switcmap (src,~)
+% toggle between contour maps of imported depth model and the calculated
+% magnetic anomaly 
+srclabel=get(src,'Label');
+drawnow;set(findobj(gcf,'Tag','Action'),'Pointer','watch');
+switch srclabel
+    case 'Depth Model'
+    load('magbinvForw.mat','x','y','z');mapper(x,y,-z,'Km','Depth Model',1)
+    case 'Calc-Mag'
+    load('magbinvForw.mat','x','y','Tcalc');mapper(x,y,Tcalc,'nT','Mag. Model',1)    
+end
+drawnow;set(findobj(gcf,'Tag','Action'),'Pointer','arrow');
+end
+
+
+function getcross 
+% creates a new GUI for cross-sectional view, interpolates data 
+% (observed anomaly, calculated anomaly and basement) between interactively 
+% selected two coordinates   
+drawnow
+delete(findobj(gcf,'Tag','crossLin'))
+set(findobj(gcf,'Tag','plc2'),'enable','off')%% view2 and view3 dissabled
+set(findobj(gcf,'Tag','plc3'),'enable','off')
 xL=xlabel('Start Line: left mouse click    End Line: right mouse click');
 set(xL,'Color','w','FontWeight','Bold','BackGroundColor','k')
 figure3 = findobj('Type','figure','name','Cross-Section');
@@ -253,8 +991,8 @@ delete (figure3);
 load('magbinv.mat','x','y','T','Tcalc','Zcalc');
 [xxx,yyy]=getline;
 if length(xxx)>1
-set(xL,'Color','k','FontWeight','normal','BackGroundColor','w',...
-    'String','Easting (Km)')
+set(xL,'Color','k','FontWeight','bold','BackGroundColor','w',...
+    'String','X (Km)')
 xp1=xxx(1);yp1=yyy(1);xp2=xxx(2);yp2=yyy(2);
 xc=linspace(xp1,xp2,100);
 yc=linspace(yp1,yp2,100);
@@ -263,72 +1001,18 @@ PROFX=linspace(0,PL,100);% profile X
 TC=interp2(x,y,T,xc,yc); % profile value Obs Mag.
 TCC=interp2(x,y,Tcalc,xc,yc);%profile calc Mag.
 ZC=interp2(x,y,Zcalc,xc,yc);% profile basement
+hold on;line(xc,yc,'Color','k','linewidth',2,'Tag','crossLin');hold off;
 plotcross(PROFX,TC,TCC,ZC)
 save('magbinv.mat','TC','TCC','ZC','xc','yc','PROFX','-append')
 end
 end
 
-function plotcross(PROFX,TC,TCC,ZC) % plot of extracted profile
-%%%thirdfig
-fig3 = figure('MenuBar','none','Name','Cross-Section',...
-'NumberTitle','off','Resize','off',...
-'Color','w',...
-'units','normalized','outerposition',[0 .1 .49 .9],...
-'DockControls','off','WindowButtonDownFcn',@posfig1);
-ax1=axes('Parent',fig3,'units','normalized','Position',[0.1 0.6 0.8 0.35]);
-axis off
-ax2=axes('Parent',fig3,'units','normalized','Position',[0.1 0.1 0.8 0.35]);
-axis off
-uimenu('Parent',fig3,'Label','Export Profile Data','CallBack',@savcross);
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-axes(ax1)
-plot(PROFX,TC,'+r',PROFX,TCC,'-k','linewidth',1);grid on;box on;
-xlim([min(PROFX) max(PROFX)]);ylabel('nT');xlabel('Distance (Km)')
-legend('Observed','Calculated');
-%%%%%%%%%%%%%%%
-axes(ax2)
-dfz=max(ZC)+(max(ZC)/5);
-ZC(end+1:end+3)=[dfz dfz ZC(1)]; 
-PROFX(end+1:end+3)=[PROFX(end) PROFX(1) PROFX(1)];
-plot(PROFX(1:end-3),-ZC(1:end-3),'-k','linewidth',2);
-patch(PROFX,-ZC,[.1 .1 .1],'FaceAlpha',.8);
-ylabel('Depth (Km)')
-xlim([min(PROFX) max(PROFX)]);
-ylim([min(-ZC) 0]);
-box on
-grid on
-end
-
-function savcross(src,event) % storing profile data
-[filename, pathname] = uiputfile(['profile' '.dat'], 'Set a Profile Name');
-kk=[pathname filename];
-if ischar(kk)
-load('magbinv.mat','TC','TCC','ZC','xc','yc','PROFX');    
-fidd=fopen(kk,'wt');
-matrix=[xc' yc' PROFX' TC' TCC' -ZC'];
-fprintf(fidd,'%s %s %s %s %s %s','Long','Lat','PROFX','Mag','CalcMag','CalcZ');
-fprintf(fidd,'\n');
-for jj=1:numel(xc); % Write matrix
-fprintf(fidd,'%f %f %f %f %f %f',matrix(jj,:));
-fprintf(fidd,'\n');
-end
-fclose(fidd);
-title('PROFILE DATA STORED','BackGroundColor','g');
-end
-end
-
-function map3v(x,y,z,tit) % 3D view option
-surf(x,y,z,'FaceColor','interp','EdgeColor','none')
-rotate3d on
-title(tit)
-box on
-pbaspect([1 1 .5])
-end
-
-
-function savbut(src,event) % manage data storings 
-nedir=get(src,'Label');
-switch nedir
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%% SAVING FUNCTIONS %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function savbut(src,~) 
+% enables the user to select the data to be exported.  
+srclabel=get(src,'Label');
+switch srclabel
     case 'Save as MAGBinv Project (*mat)' 
     savmat
     case 'RMS List (*.dat)'
@@ -344,141 +1028,18 @@ switch nedir
     case 'Save Plots as Images'
     expofig    
 end
-
 end
 
-function expofig (src,event) % manage image storing
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-fig2 = figure('MenuBar','none','Name','Action',...
-'NumberTitle','off','Resize','off',...
-'Color','w',...
-'units','normalized','outerposition',[.5 .1 .49 .9],...
-'DockControls','off');
-uimenu('Parent',fig2,'Label','PRINT','CallBack',@ploprint);
-uimenu('Parent',fig2,'Label','RETURN','CallBack',@returproj);
-set(fig2,'WindowButtonDownFcn', @selectoutmapimag)
-axes('Parent',fig2,'units','normalized','Position',[0.15 0.1 0.75 0.75]);
-text(0.2,0.6,{'1. Click on screen to select an output map/graphic';...
-              '2. Use Print menu to save as image file...'})
-axis off
-end
-function selectoutmapimag(src,event) % popup window for output selection
-set(gcf,'outerposition',[.5 .1 .49 .9])
-str = {'Basement Depth';'Inverted Anomaly';'Anomaly Difference';
-    'Filter Construction';'RMS Plot';'Observed Anomaly'};
-      [s,v] = listdlg('PromptString','Select Output Map:',...
-                      'SelectionMode','single',...
-                      'ListString',str,'ListSize',[200 120]);
-load('magbinv.mat','x','y','T','Tcalc','Zcalc','Tdiff','rmstor');
- if v==1;    
-  switch s
-      case 1
-      mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
-      case 2
-      mapper(x,y,Tcalc,'nT','Calculated Mag.',1)
-      case 3
-      mapper(x,y,Tdiff,'nT','Anomaly Difference',1)
-      case 4
-      showfiltercons
-      case 5
-      plot(rmstor,'-ko','MarkerFaceColor','r','MarkerSize',5);
-      set(gca,'FontSize',10,'FontWeight','bold')
-      sent1=['RMS(1)=' num2str(rmstor(1))];
-      sent2=['RMS(end)=' num2str(rmstor(end))];
-      title ({'RMS-Graph'; [sent1 '    ' sent2]})
-      xlabel('Iteration number');ylabel('RMS');
-      xlim([1 numel(rmstor)])
-      grid on
-      pbaspect([1 1 1]);axis square
-      case 6
-      mapper(x,y,T,'nT','Observed Mag.',1)
-  end
- end
-                  
-end
-
-
-
-function ploprint(src,event) % export as png image format
-[filename, pathname] = uiputfile('*.png','Set a filename');
-kk=[pathname filename];
-if ischar(kk)
-print(kk, '-dpng', '-r500');
-drawnow
-plot(.5,.5,'k+')
-text(0.1,0.6,{'1. Image saved....Click on screen for new selection.';...
-              '2. Use Print menu to save as image file...'})
-axis off
-end
-end
-
-function returproj(src,event) % close and return to output GUI window
-clc;clear all;clear global;
-load('magbinv.mat');
-%%%%%%%%%%%%%%close existing open figures
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-figure3 = findobj('Type','figure','name','Cross-Section');
-delete (figure3);
-%%%%%%%%%%%%%%%%%%%%
-%Secondfig
-fig2 = figure('MenuBar','none','Name','Action',...
- 'NumberTitle','off','Resize','off',...
- 'Color','w',...
- 'units','normalized','outerposition',[.5 .1 .49 .9],...
- 'DockControls','off');
- set(fig2,'WindowButtonDownFcn', @selectoutmap)
- axes('Parent',fig2,'units','normalized','Position',[0.15 0.02 0.75 0.75]);
- axis off
-psbut=uicontrol(fig2,'Style','pushbutton','units','normalized',...
-'BackGroundColor',[.8 .8 .8],'HorizontalAlignment','right',...
-'Position',[0 .95 1 0.03],'String','RMS Plot','Callback',@rmsplot);
-mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
-menu1 = uimenu('Parent',fig2,'Label','SAVE/Export'); 
-uimenu('Parent',menu1,'Label','Save as MAGBinv Project (*mat)','CallBack',@savbut);
-menu2=uimenu('Parent',menu1,'Label','Export');
-uimenu('Parent',menu2,'Label','RMS List (*.dat)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Calc-Z grid (*.grd)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Calc-T grid (*.grd)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Diff. (T-CalcT) grid (*.grd)','CallBack',@savbut);
-uimenu('Parent',menu2,'Label','Export All','CallBack',@savbut);
-uimenu('Parent',fig2,'Label','Save Plots as Images','CallBack',@savbut);
-maxd=max(max(Zcalc));
- mind=min(min(Zcalc));
- meand=mean(mean(Zcalc));
- rs=numel(rmstor);
- uitable('Parent',fig2,'units','normalized','Position',[.02,.87,.97,.07],...
- 'ColumnName',{'Max Depth','Min Depth','Mean Depth','Iteration Step'},...
- 'Rowname',{'STAT'},...
- 'ColumnWidth',{100,100,100,100},...
- 'Enable','off','Data',[maxd mind meand rs]);
- uicontrol('Parent',fig2,'Style','text','units','normalized',...
- 'Position',[.02,.81,.4,.04],'String','Click on screen to switch between output maps',...
- 'BackGroundColor','w','ForeGroundColor','b','Tag','uyari',...
- 'HorizontalAlignment','left')
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.85,.83,.13,.03],'String','Color-Map','Tag','plc1',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.71,.83,.13,.03],'String','View-3','Tag','plc2',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.55,.83,.15,.03],'String','View-2 (default)','Tag','plc3',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
- uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
- 'Position',[.8,.88,.18,.05],'String','Cross-Section','Tag','plc4',...
- 'ForeGroundColor','k','CallBack',@plotcontrol)
-end
-
-
-function savout(typ) % store data
+function savout(typ) 
+% exports the desired output as data file. Maps are stored as 2D data 
+% in *.grd format where as the RMS variation is stored in ascii format (*.dat).
 load('magbinv.mat');
 [filename, pathname] = uiputfile([filnam '.mgb'],...
 'Set filename of data: an extension will be determined automatically according the data type');
 kk=[pathname filename];
 if ischar(kk)
-kk=kk(1:end-4);    
+[~,name,~] = fileparts(kk);
+kk=[pathname name];  
 switch typ
     case 1
         rmstor=rmstor';n=1:numel(rmstor);n=n';matrix=[n rmstor];
@@ -499,728 +1060,84 @@ end
 end
 end
 
-function savmat %store as mat file
-clc;clear all;clear global;
+function savmat
+% exports all inputs/outputs as a single matlab binary file (*.mat) 
 load('magbinv.mat');
-load('magbinvset.mat');
 [filename, pathname] = uiputfile([filnam '.mat'], ' Set a Project Name');
-filename=filename(1:end-4);filename=[filename '_mgb.mat'];
+[~,filename,~]=fileparts(filename);
+filename=[filename '_mgb.mat'];
 kk=[pathname filename];
 if ischar(kk)
-save(kk,'x','y','T','Tcalc','Tdiff','Zcalc','rmstor','SH','WH','p','px',...
+save(kk,'x','y','T','Tcalc','Tdiff','Zcalc','rmstor',...
     'nx','ny','dx','dy','xmin','xmax','ymin','ymax','setto','filnam')
 msgbox({'Project is Stored as *mgd.mat file...';...
     ' can be re-Open by Import Data > OPEN MAGBinv Project)'})
 end
 end
 
-function selectoutmap(src,event) % output plot manager
-set(gcf,'outerposition',[.5 .1 .49 .9])
-str = {'Basement Depth';'Inverted Anomaly';'Anomaly Difference';
-    'Filter Construction'};
-      [s,v] = listdlg('PromptString','Select Output Map:',...
-                      'SelectionMode','single',...
-                      'ListString',str,'ListSize',[160 80]);
-
-load('magbinv.mat','x','y','Tcalc','Zcalc','Tdiff');
- if v==1;    
-  switch s
-      case 1
-      mapper(x,y,-Zcalc,'Km','Calculated Depth',1)
-      set(findobj(gcf,'Tag','plc1'),'enable','on')
-      set(findobj(gcf,'Tag','plc2'),'enable','on')
-      set(findobj(gcf,'Tag','plc3'),'enable','on')
-      set(findobj(gcf,'Tag','plc4'),'enable','on')
-      case 2
-      mapper(x,y,Tcalc,'nT','Calculated Mag.',1)
-      set(findobj(gcf,'Tag','plc1'),'enable','on')
-      set(findobj(gcf,'Tag','plc2'),'enable','off')
-      set(findobj(gcf,'Tag','plc3'),'enable','off')
-      set(findobj(gcf,'Tag','plc4'),'enable','on')
-      case 3
-      mapper(x,y,Tdiff,'nT','Anomaly Difference',1)
-      set(findobj(gcf,'Tag','plc1'),'enable','on')
-      set(findobj(gcf,'Tag','plc2'),'enable','off')
-      set(findobj(gcf,'Tag','plc3'),'enable','off')
-      set(findobj(gcf,'Tag','plc4'),'enable','on')
-      case 4
-      showfiltercons
-      set(findobj(gcf,'Tag','plc1'),'enable','off')
-      set(findobj(gcf,'Tag','plc2'),'enable','off')
-      set(findobj(gcf,'Tag','plc3'),'enable','off')
-      set(findobj(gcf,'Tag','plc4'),'enable','off')
-  end
- end
-                  
+function savcross(~,~) 
+% exports cross-section data to an ascii file (*.dat)  
+[filename, pathname] = uiputfile(['profile' '.dat'], 'Set a Profile Name');
+kk=[pathname filename];
+if ischar(kk)
+load('magbinv.mat','TC','TCC','ZC','xc','yc','PROFX');    
+fidd=fopen(kk,'wt');
+matrix=[xc' yc' PROFX' TC' TCC' -ZC'];
+fprintf(fidd,'%s %s %s %s %s %s','Long','Lat','PROFX','Mag','CalcMag','CalcZ');
+fprintf(fidd,'\n');
+for jj=1:numel(xc); % Write matrix
+fprintf(fidd,'%f %f %f %f %f %f',matrix(jj,:));
+fprintf(fidd,'\n');
 end
-
-function showfiltercons % filter design plotter
-load('magbinv.mat','p','px','SH','WH');
-plot(px,p,'k','LineWidth',2);
-line([WH WH],[min(p) max(p)],'Color','b','LineStyle','--','LineWidth',3)
-line([SH SH],[min(p) max(p)],'Color','r','LineStyle','--','LineWidth',3)
-pbaspect([1 .75 1])
-grid on
-title(['SH=' num2str(SH) '   WH=' num2str(WH)])
-xlabel('k/2*pi');ylabel('Log(P)');
-end
-
-function rmsplot(src,event) % RMS plotter
-load('magbinv.mat','rmstor');
-plot(rmstor,'-ko','MarkerFaceColor','r','MarkerSize',5);
-set(gca,'FontSize',10,'FontWeight','bold')
-sent1=['RMS(1)=' num2str(rmstor(1))];
-sent2=['RMS(end)=' num2str(rmstor(end))];
-title ({'RMS-Graph'; [sent1 '    ' sent2]})
-xlabel('iteration step');ylabel('RMS');
-xlim([1 numel(rmstor)])
-      grid on
-      pbaspect([1 1 1]);axis square
-rotate3d off
-set(findobj(gcf,'Tag','uyari'),'string',...
-'Click on screen to switch between output maps','ForeGroundColor','b')
-set(findobj(gcf,'Tag','plc1'),'enable','off')
-set(findobj(gcf,'Tag','plc2'),'enable','off')
-set(findobj(gcf,'Tag','plc3'),'enable','off')
-set(findobj(gcf,'Tag','plc4'),'enable','off')
-end
-
-function maininv(setto,fig2) %%% Kernel of main inversion
-load('magbinv.mat','T','x','y','nx','ny','dx','dy','SH','WH');
-freqorder=sort([SH WH]);WH=freqorder(1);SH=freqorder(2);
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%get initials 
-T0=T;
-T=T./(10^9);
-M=setto(5);
-Im=setto(3)*pi/180;
-If=setto(1)*pi/180;
-Dm=setto(4)*pi/180;
-Df=setto(2)*pi/180;
-z0=setto(6);
-alpha=0;
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-nx0=nx;ny0=ny;
-T(1,nx+floor(nx/2))=0;
-T(ny+floor(ny/2),1)=0;
-T=rot90(rot90(T));
-T(1,nx+2*floor(nx/2))=0;
-T(ny+2*floor(ny/2),1)=0;
-T=rot90(rot90(T));
-if (mod(nx,2)~=0) nx=nx-1; T(:,end)=[]; end
-if (mod(ny,2)~=0) ny=ny-1; T(end,:)=[]; end
-nxm=2*nx; nym=2*ny;
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-dkx= 2.*pi./((nxm-1).*dx);
-dky= 2.*pi./((nym-1).*dy);
-nyqx= (nxm/2)+1;
-nyqy= (nym/2)+1; 
- for j=1:nxm
-        if j <= nyqx
-          kx(j)=(j-1)*dkx;
-        else
-          kx(j)=(j-(nxm+1))*dkx;
-        end 
- for i=1:nym
-        if i <= nyqy
-          ky(i)=(i-1)*dky;
-        else
-          ky(i)=(i-(nym+1))*dky;
-        end 
-        k(i,j)=sqrt(kx(j).^2+ky(i).^2);
-        if(k(i,j)==0) k(i,j)=0.0000000001; end;
- end
- end
- [kx ky]=meshgrid(kx,ky);
- cm=10^-7;
- mx=cos(Im)*sin(Dm-alpha);
- my=cos(Im)*cos(Dm-alpha);
- mz=sin(Im);
- fx=cos(If).*sin(Df-alpha);
- fy=cos(If).*cos(Df-alpha);
- fz=sin(If);
-
-for m=1:nym
-for n=1:nxm
-    thetam(m,n)=mz+(1i).*((mx.*kx(m,n)+my.*ky(m,n))./abs(k(m,n)));
-    thetaf(m,n)=fz+(1i).*((fx.*kx(m,n)+fy.*ky(m,n))./abs(k(m,n)));
-    hs(m,n)=M*2.*pi.*cm.*thetam(m,n).*thetaf(m,n).*exp(-k(m,n).*z0);
+fclose(fidd);
+title('PROFILE DATA STORED','BackGroundColor','g');
 end
 end
-%%%%%%%%%%%%%%%%%%%%            
-ktotal=k./(2*pi); 
-for f=1:nym;
-   for g=1:nxm;
-      if ktotal(f,g)<WH
-      filter(f,g)=1;  
-elseif ktotal(f,g)<SH
-      filter(f,g)=0.5.*(1+cos((((2*pi)*ktotal(f,g))-(2*pi*WH))/(2*(SH-WH))));
+
+function ploprint(src,event) 
+% exports plot on screen as *png image format with 500 dpi in resolution
+clc;clear all; clear global;
+[filename, pathname] = uiputfile('*.png','Set a filename');
+kk=[pathname filename];
+if ischar(kk)
+print(kk, '-dpng', '-r500');
+drawnow
+plot(.5,.5,'k+')
+text(0.1,0.6,{'1. Image saved....Click on screen for new selection.';...
+              '2. Use Print menu to save as image file...'})
+axis off
+end
+end
+
+function saveforward(src,~) 
+% exports the calculated magnetic anomaly grid due to the depth model. 
+srclabel=get(src,'Label');
+switch srclabel
+    case 'Get Screen as Image File(*.png)'
+        ext='*.png';
+    case 'Save Mag-Data File (*.grd)'
+        ext='*.grd';
+end
+[filename, pathname] = uiputfile(ext,'Set a filename');
+fsourc=[pathname filename];
+if ischar(fsourc)
+if strcmp(srclabel,'Get Screen as Image File(*.png)');
+   print(fsourc, '-dpng', '-r500');
+   title('Saved as image file...')
 else
-filter(f,g)=0;
+    set(findobj(gcf,'Tag','Action'),'Pointer','watch')
+    load('magbinvForw.mat','Tcalc','x','y','xmin','xmax','ymin','ymax');
+    mapper(x,y,Tcalc,'nT','Mag-Model is saved as grid file...',1)
+    [~,fnam,~]=fileparts(fsourc);
+    grdout(Tcalc,xmin,xmax,ymin,ymax,[pathname fnam '-Tcalc.grd']);
+    set(findobj(gcf,'Tag','Action'),'Pointer','arrow')
 end
-   end;
-end;
-FT=fft2(T);
-Fh=FT./(hs.*(-k));
-Fh=Fh.*filter;
-Fh(1,1)=0;
-h=real(ifft2(Fh)); h0=h;
-h_old=h; %%%first approximation
-%%%%%%%%%%%%%%%%%%%%% Iteration RMS Convergence (Stop RMS < threshold)
-if setto(7)==0;
-rms=1000;
-rmstor=1000; % 
-criterio=setto(8);% threshold value
-m=2;
-%%%%%%%%%%%create a waitbarr
-steps = setto(9);
-psbut=uicontrol(fig2,'Style','pushbutton','units','normalized',...
-'BackGroundColor','r','HorizontalAlignment','right',...
-'Position',[0 .95 1/steps 0.03],'Callback',@rmsplot);
-%%%%%%%%%%%
- while rms>criterio % h_old needs to change...
-     drawnow
-     set(psbut,'Position',[0 .95 (m-1)/steps 0.03],'String',num2str(m-1));
-     Fh=Fh-((-k).^(m-1)).*fft2(h.^m)./factorial(m);
-     Fh=Fh.*filter;
-     h=real(ifft2(Fh)); %new h in step
-     dh=h-h_old; 
-     dh2=dh.^2;
-     rms=sqrt(sum(sum(dh2))./(nxm*nym)); % rms from new h
-     rmstor(m)=rms;
-     h_old=h; % if rms < criterio then this new h is our best result 
-     if m-1==setto(9);break;end % step is equal maxiter then quit...
-     m=m+1; %% non of criteria is achieved..new iteration starts
- end
-end
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%RMS Divergence (Stop when RMSi>RMSi-1)
-if setto(7)==1;
-rms=1000;
-rmstor(1)=1000; 
-steps = setto(9);
-%%%%%%%%%%% create a waitbarr
-psbut=uicontrol(fig2,'Style','pushbutton','units','normalized',...
-'BackGroundColor','r','Position',[0 .95 1/steps 0.03],...
-'Callback',@rmsplot);
-%%%%%%%%%%%
- for istep=2:steps+1
-     m=istep;
-     drawnow
-     set(psbut,'Position',[0 .95 (m-1)/steps 0.03],'String',num2str(m-1))
-     Fh=Fh-((-k).^(m-1)).*fft2(h.^m)./factorial(m);
-     Fh=Fh.*filter;
-     h=real(ifft2(Fh)); %new h in step m
-     dh=h-h_old; 
-     dh2=dh.^2;
-     rms=sqrt(sum(sum(dh2))./(nxm*nym)); % new rms from new h
-     if rms>rmstor(istep-1); break;end % % new h is not suitable..use h_old of best approximation
-     rmstor(istep)=rms; %new rms is stored for next iteration
-     h_old=h;
-     if istep-1==setto(9);break;end % step is equal maxiter then quit...
-     %%% h_old is updated 
-  end
-end
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%% Plot results obtained from Convergence or divergence
-%%%%%%%%%%%%%%%%%%%%%% inversion.
-z=h_old+z0;
-z=z(ny/2+1:ny/2+ny0,nx/2+1:nx/2+nx0);
-%%%%%%%%%%% calculate forward mag from calculated z
-Tcalc=forwardmag(z,nx0,ny0,dx,dy,M,Im,If,Dm,Df,alpha,z0);
-Zcalc=z;
-Tdiff=T0-Tcalc;
-rmstor(1)=[];% delete the no comparing status
-save('magbinv.mat','Tcalc','Zcalc','Tdiff','rmstor','-append');
-drawnow
-set(psbut,'String','preparing outputs..please wait','BackGroundColor',[.8 .8 .8],...
-    'Position',[0 .95 1 0.03],'Enable','off');
-drawnow
-mapper(x,y,-z,'Km','Calculated Depth',1)
-drawnow
-set(psbut,'String','Plot RMS graph','BackGroundColor','g',...
-    'Position',[0 .95 1 0.03],'Enable','on');
+end    
 end
 
-%%%%%%%%%%%%%%%%%%%%%%FORWARD MAG CALC %%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function Tcalc=forwardmag(z,nx,ny,dx,dy,M,Im,If,Dm,Df,alpha,z0)
-order=10;
-z=z-z0;
-%% extending
-nx0=nx;ny0=ny;
-z(1,nx+floor(nx/2))=0;
-z(ny+floor(ny/2),1)=0;
-z=rot90(rot90(z));
-z(1,nx+2*floor(nx/2))=0;
-z(ny+2*floor(ny/2),1)=0;
-z=rot90(rot90(z));
-if (mod(nx,2)~=0) nx=nx-1; z(:,end)=[]; end
-if (mod(ny,2)~=0) ny=ny-1; z(end,:)=[]; end 
-nxm=2*nx; nym=2*ny;
-%% 
-dkx= 2.*pi./((nxm-1).*dx);
-dky= 2.*pi./((nym-1).*dy);
-nyqx= (nxm/2)+1;
-nyqy= (nym/2)+1; 
-for j=1:nxm
-       if j <= nyqx
-         kx(j)=(j-1)*dkx;
-       else
-         kx(j)=(j-(nxm+1))*dkx;
-       end 
-for i=1:nym
-       if i <= nyqy
-         ky(i)=(i-1)*dky;
-       else
-         ky(i)=(i-(nym+1))*dky;
-       end 
-       k(i,j)=sqrt(kx(j).^2+ky(i).^2);
-       if(k(i,j)==0) k(i,j)=0.00000001; end;
-end
-end
-[kx ky]=meshgrid(kx,ky);
-%%
-cm=10^-7;
-mx=cos(Im)*sin(Dm-alpha);
-my=cos(Im)*cos(Dm-alpha);
-mz=sin(Im);
-fx=cos(If).*sin(Df-alpha);
-fy=cos(If).*cos(Df-alpha);
-fz=sin(If);
-%%
-for m=1:nym
-for n=1:nxm
-    thetam(m,n)=mz+(1i).*((mx.*kx(m,n)+my.*ky(m,n))./abs(k(m,n)));
-    thetaf(m,n)=fz+(1i).*((fx.*kx(m,n)+fy.*ky(m,n))./abs(k(m,n)));
-    hs(m,n)=M*2.*pi.*cm.*thetam(m,n).*thetaf(m,n).*exp(-k(m,n).*z0);
-end
-end
-%%
-SumF=0;
-for m=1:order;
-     SumF=SumF+((-k).^(m))./(factorial(m)).*fft2(z.^m);
-end;
-FT=hs.*SumF;
-%FT(1,1)=0;
-T=(ifft2(FT));
-T=real(T);
-T=T.*10^9;
-Tcalc=T(ny/2+1:ny/2+ny0,nx/2+1:nx/2+nx0);
-end
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-function setact1(src,event) % activate Settings menu
-nedir=get(src,'Label');
-switch nedir
-    case 'Set Initial Parameters'
-    parametw
-    case 'RMS Divergence (RMS(i+1)>RMS(i))'
-    set(findobj(gcf,'Tag','c21'),'Checked','on')
-    set(findobj(gcf,'Tag','c22'),'Checked','off')
-    setto=get(findobj(gcf,'Tag','tabl1'),'Data');
-    setto(7:8)=[1 0];
-    save('magbinvset.mat','setto','-append');
-    set(findobj(gcf,'Tag','tabl1'),'Data',setto);
-    case 'RMS Convergence (RMS<threshold)'
-    set(findobj(gcf,'Tag','c21'),'Checked','off')
-    set(findobj(gcf,'Tag','c22'),'Checked','on')
-    setcriterion
-    case 'MaxIter'
-    setmaxiter
-    case 'Filter Observed Grid'
-    setfilters    
-end
-end
-
-function setfilters %%% activate filter design window
-%%%Secondfig
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-fig2 = figure('MenuBar','none','Name','Action',...
-'NumberTitle','off','Resize','off',...
-'Color','w',...
-'units','normalized','outerposition',[.5 .1 .49 .9],...
-'DockControls','off');
-uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
-'Position',[.89,.96,.1,.03],...
-'String','Help',...
-'FontWeight','bold','CallBack',@positionshwh)
-uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
-'Position',[0,.96,.15,.03],...
-'String','Set SH',...
-'FontWeight','bold','ForeGroundColor','r','CallBack',@positionshwh)
-uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
-'Position',[.16,.96,.15,.03],...
-'String','Set WH',...
-'FontWeight','bold','ForeGroundColor','b','CallBack',@positionshwh)
-
-uicontrol('Parent',fig2,'Style','pushbutton','units','normalized',...
-'Position',[.32,.96,.15,.03],...
-'String','Set Manually',...
-'FontWeight','bold','ForeGroundColor','k','CallBack',@manushwh)
-
-uicontrol('Parent',fig2,'Style','text','units','normalized',...
-'Position',[.02,.89,.6,.04],'String',...
-'Click on dashed lines to determine the current position of SH and WH',...
-'BackGroundColor','w','ForeGroundColor','b','Tag','uyari',...
-'HorizontalAlignment','left')
-
-axes('Parent',fig2,'units','normalized','Position',[0.2 0.1 0.6 0.6]);
-%%%%%current SHWH
-load('magbinv.mat','p','px','SH','WH');
-plot(px,p,'k','LineWidth',2);
-line([WH WH],[min(p) max(p)],'Color','b','LineStyle','--','LineWidth',3,...
-    'ButtonDownFcn',@shwhfig)
-line([SH SH],[min(p) max(p)],'Color','r','LineStyle','--','LineWidth',3,...
-    'ButtonDownFcn',@shwhfig)
-pbaspect([1 1 1])
-grid on
-title ({'Radially Averaged Pow-Spectrum Graph';...
-'Set SH and WH frequency band array for lowpass filtering'})
-xlabel('k/2*pi');ylabel('Log(P)');
-%%%%%
-end
-function shwhfig(src,event) % set current SH WH values as title
-load('magbinv.mat','SH','WH');
-title(['SH=' num2str(SH) '   WH=' num2str(WH)])
-end
-
-function manushwh(src,event) % Set SH WH by manually entering
-load('magbinv.mat','p','px','SH','WH');
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-prompt = {'SH'; 'WH'};
-dlg_title = 'parameters';
-num_lines = 1;
-def = {num2str(SH);num2str(WH)};
-answer= inputdlg(prompt,dlg_title,num_lines,def);
-if numel(answer)>0
-SH=str2num(cell2mat(answer(1)));if SH<0;SH=0;end
-WH=str2num(cell2mat(answer(2)));if WH<0;WH=0;end
-plot(px,p,'k','LineWidth',2);
-line([WH WH],[min(p) max(p)],'Color','b','LineStyle','--','LineWidth',3,...
-    'ButtonDownFcn',@shwhfig)
-line([SH SH],[min(p) max(p)],'Color','r','LineStyle','--','LineWidth',3,...
-    'ButtonDownFcn',@shwhfig)
-pbaspect([1 1 1])
-grid on
-xlabel('k/2*pi');ylabel('Log(P)');
-save('magbinv.mat','SH','WH','-append');
-shwhfig
-fg1 = findobj('Type','figure','name','MagB_inv');
-set(findobj(fg1,'Tag','startbut'),'Enable','on')
-end
-end
-
-
-function positionshwh(src,event) %%% set SH WH interactively
-nedir=get(src,'String');
-switch nedir
-    case 'Set SH'
-    set (gcf, 'WindowButtonMotionFcn', @mouseMove);
-    set (gcf, 'WindowButtonDownFcn', @getmouseloc);
-    set(gcf,'Pointer','fullcrosshair');
-    load('magbinv.mat','p','px','SH','WH');
-    plot(px,p,'k','LineWidth',2);
-    line([WH WH],[min(p) max(p)],'Color','b','LineStyle','--','LineWidth',3)
-    pbaspect([1 1 1])
-    grid on
-    title ('Set SH')
-    fg1 = findobj('Type','figure','name','MagB_inv');
-    set(findobj(fg1,'Tag','startbut'),'Enable','on')
-    case 'Set WH'
-    set (gcf, 'WindowButtonMotionFcn', @mouseMove);
-    set (gcf, 'WindowButtonDownFcn', @getmouseloc);
-    set(gcf,'Pointer','fullcrosshair');
-    load('magbinv.mat','p','px','SH','WH');
-    plot(px,p,'k','LineWidth',2);
-    line([SH SH],[min(p) max(p)],'Color','r','LineStyle','--','LineWidth',3)
-    pbaspect([1 1 1])
-    grid on
-    title ('Set WH')
-    fg1 = findobj('Type','figure','name','MagB_inv');
-    set(findobj(fg1,'Tag','startbut'),'Enable','on')
-    case 'Help'
-    set (gcf, 'WindowButtonMotionFcn', '');
-    set (gcf, 'WindowButtonDownFcn', '');
-    set(gcf,'Pointer','arrow');
-    k=1:50;f=ones(1,50);sh=30;wh=20;
-    f(20:30)=0.5.*(1+cos((((2*pi)*k(20:30))-(2*pi*wh))/(2*(sh-wh))));
-    f(31:end)=0;
-    plot(k,f,'--k','linewidth',3)
-    pbaspect([1 1 1])
-    grid on
-    title('Filter configuration')
-    hold on
-    plot([20 20],[-0.5 1.5],'--b','Linewidth',2);
-    text(16,-0.45,'WH','Color','b')
-    plot([30 30],[-0.5 1.5],'--r','Linewidth',2)
-    text(31,-0.45,'SH','Color','r')
-    hold off
-    xlabel('frequency')
-    ylim([-0.5 1.5])
-    set(gca,'xtick',[])
-    text(10,1.2,'Full-Pass ','Color','b')
-    text(35,0.2,'Reject','Color','r')
-end
-end
-
-function getmouseloc(src,event) % mouse location finder regarding x axis
-C = get (gca, 'CurrentPoint');
-xlabel(['Selected frequency=' num2str(C(1,1))])
-tit=get (gca, 'Title');
-stit=get(tit,'String');
-switch stit
-    case 'Set SH'
-    SH=C(1,1); if SH<0;SH=0;end
-    save('magbinv.mat','SH','-append');
-    load('magbinv.mat','p');
-    line([SH SH],[min(p) max(p)],'Color','r','LineStyle','--','LineWidth',3)
-    case 'Set WH'
-    WH=C(1,1);if WH<0;WH=0;end
-    save('magbinv.mat','WH','-append');
-    load('magbinv.mat','p');
-    line([WH WH],[min(p) max(p)],'Color','b','LineStyle','--','LineWidth',3)
-end
-set (gcf, 'WindowButtonMotionFcn', '');
-set (gcf, 'WindowButtonDownFcn', '');
-set(gcf,'Pointer','arrow');
-shwhfig
-end
-function mouseMove(src,event) %% instant location info
-C = get (gca, 'CurrentPoint');
-xlabel(gca, ['Current-freq = ', num2str(C(1,1)) '  (k/2pi)']);
-end
-
-
-function setmaxiter %%% set of maximum iteration number
-setto=get(findobj(gcf,'Tag','tabl1'),'Data');
-prompt = {'Maximum number of iteration...(in case criterion is not achieved)'};
-dlg_title = 'Maxiter';
-num_lines = 1;
-def = {num2str(setto(9))};
-answer= inputdlg(prompt,dlg_title,num_lines,def);
-if numel(answer)>0
-maxiter=str2num(cell2mat(answer(1)));maxiter=abs(maxiter);
-setto(9)=round(maxiter);
-save('magbinvset.mat','setto','-append');
-set(findobj(gcf,'Tag','tabl1'),'Data',setto);
-end
-end
-
-function setcriterion %%% manage termination criteria
-setto=get(findobj(gcf,'Tag','tabl1'),'Data');
-prompt = {'set threshold RMS (Terminating if RMS<= threshold)'};
-dlg_title = 'Criterion';
-num_lines = 1;
-def = {num2str(setto(8))};
-answer= inputdlg(prompt,dlg_title,num_lines,def);
-if numel(answer)>0
-criteria=str2num(cell2mat(answer(1)));
-setto(7:8)=[0 abs(criteria)];
-save('magbinvset.mat','setto','-append');
-set(findobj(gcf,'Tag','tabl1'),'Data',setto);
-end
-end
-
-function parametw %%% Grid info panel
-prompt = {'Inc. angle of ambient field (Incf)?'; 'Dec. angle of ambient field (Df)?';...
-    'Inc. angle of magnetization(Im) ?'; 'Dec. angle of magnetization(Dm)?';...
-'Magnetization Contrast (M)?';
-'Average interface depth Z0 (unit in Km)?'};
-dlg_title = 'parameters';
-num_lines = 1;
-setto=get(findobj(gcf,'Tag','tabl1'),'Data');
-def = {num2str(setto(1));num2str(setto(2));num2str(setto(3));...
-    num2str(setto(4));num2str(setto(5));num2str(setto(6))};
-answer= inputdlg(prompt,dlg_title,num_lines,def);
-if numel(answer)>0
-If=str2num(cell2mat(answer(1)));
-Df=str2num(cell2mat(answer(2)));
-Im=str2num(cell2mat(answer(3)));
-Dm=str2num(cell2mat(answer(4)));
-M=str2num(cell2mat(answer(5)));
-z0=abs(str2num(cell2mat(answer(6))));
-setto(1:6)=[If Df Im Dm M z0];
-save('magbinvset.mat','setto','-append');
-set(findobj(gcf,'Tag','tabl1'),'Data',setto);
-end
-end
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%radially averaged power spectrum
-function [p,xlimits]=getraps(T,nx,ny,dx,dy);
-T(1,nx+floor(nx/2))=0;
-T(ny+floor(ny/2),1)=0;
-T=rot90(rot90(T));
-T(1,nx+2*floor(nx/2))=0;
-T(ny+2*floor(ny/2),1)=0;
-T=rot90(rot90(T));
-if (mod(nx,2)~=0) nx=nx-1; T(:,end)=[]; end
-if (mod(ny,2)~=0) ny=ny-1; T(end,:)=[]; end 
-[p,~]=calcrad2(T);% radially averaged power spectrum
-nyq = 1/(2*dx); % frequency axis 
-p = log(smooth(p));
-sca = length(p);
-xlimits = linspace(0,nyq,sca);
-end
-%%%%%%%%%%%%%% New data import
-%%%%%action menu 1 IMPORT 2-D (*.grd) Golden Software Binary/or Text grid 
-function impgrd(src,event);
-clc;
-[filename, pathname] = uigetfile('*.grd', 'Import Golden Software Binary/Text grid (*.grd)');
-k=[pathname filename];
-if ischar(k)
-fidc=fopen(k);
-header= fread(fidc,4,'*char' )';
-fclose(fidc);
-c1=strcmp(header,'DSAA');
-c2=strcmp(header,'DSRB');
-sumc=sum([c1 c2]);
-if sumc>0
-%%delete temporary import file 
-if exist('magbinv.mat','file')==2;delete('magbinv.mat');end
-set(findobj(gcf,'Tag','mainfig'),'Pointer','watch')
-switch c1
-    case 1
-[T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd6txt(k);
-    case 0
-[T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd7bin(k);        
-end
-if dx~=dy;msgbox('grid interval dx=dy required...');return;end
-[p,px]=getraps(T,nx,ny,dx,dy);
-SH=0;
-WH=0;
-filnam=filename(1:end-4);
-list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,k);
-save('magbinv.mat','T','x','y','nx','ny','xmin','xmax','ymin','ymax','dx','dy',...
-    'p','px','SH','WH','filnam');
-%fileattrib('magbinv.mat','+h');%hidden temporary import info file
-drawnow
-mapper(x,y,T,'nT','Observed Anomaly',1)
-set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow')
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-figure3 = findobj('Type','figure','name','Cross-Section');
-delete (figure3);
-set(findobj(gcf,'Tag','c3'),'Enable','on')
-set(findobj(gcf,'Tag','startbut'),'Enable','off')
-else
-msgbox('File format not supported..Load Surfer 6 text grid / Surfer 7 Binary Grid')
-end
-end
-end
-%%%%%action menu 1 IMPORT a XYZ (*.dat) equal spaced columnwise grid file 
-function impgrdat(src,event);
-clc;
-[filename, pathname] = uigetfile('*.dat', 'Import XYZ grid data(*.dat)');
-k=[pathname filename];
-if ischar(k)
-if exist('magbinv.mat','file')==2;delete('magbinv.mat');end
-set(findobj(gcf,'Tag','mainfig'),'Pointer','watch')
-[T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrdatfile_Callback(k);
-[p,px]=getraps(T,nx,ny,dx,dy);
-SH=0;
-WH=0;
-filnam=filename(1:end-4);
-list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,k)
-save('magbinv.mat','T','x','y','nx','ny','xmin','xmax','ymin','ymax','dx','dy',...
-    'p','px','SH','WH','filn');
-%fileattrib('magbinv.mat','+h');%hidden temporary import info file
-drawnow
-mapper(x,y,T,'nT','Observed Anomaly',1)
-set(findobj(gcf,'Tag','mainfig'),'Pointer','arrow')
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-figure3 = findobj('Type','figure','name','Cross-Section');
-delete (figure3);
-set(findobj(gcf,'Tag','c3'),'Enable','on')
-set(findobj(gcf,'Tag','startbut'),'Enable','off')
-end
-end
-
-%%%%%read Surfer 6 text grid(*.grd)
-function [T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd6txt(k)
-surfergrd=fopen(k,'r'); % Open *.grid file
-dsaa=fgetl(surfergrd);  % Header
-% Get the map dimension [NX: East NY: North];
-datasize=str2num(fgetl(surfergrd)); nx=datasize(1); ny=datasize(2);
-% Map limits: xmin, xmax, ymin ymax
-xcoor=str2num(fgetl(surfergrd)); xmin=xcoor(1); xmax=xcoor(2);
-ycoor=str2num(fgetl(surfergrd)); ymin=ycoor(1); ymax=ycoor(2);
-% check intervals in x and y direction 
-dx=(xmax-xmin)/(nx-1);dx=abs(dx);
-dy=(ymax-ymin)/(ny-1);dy=abs(dy);
-% data limits
-anom=str2num(fgetl(surfergrd)); t0min=anom(1); t0max=anom(2);
-% data matrix 
-[T,numb] = fscanf(surfergrd, '%f', [nx,ny]);
-T=T'; % Traspose matrix
-fclose(surfergrd);
-% map coordinate matrix
-[x,y]=meshgrid(xmin:dx:xmax,ymin:dy:ymax);
-end
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%read Surfer 7 Binary grid
-function [T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy] = lodgrd7bin(filename)
-fid= fopen(filename);
-fread(fid,4,'*char' )';
-fread(fid,1,'uint32');fread(fid,1,'uint32');
-fread(fid,4,'*char' )';fread(fid,1,'uint32');
-ny= fread(fid,1,'uint32'); nx= fread(fid,1,'uint32');
-xmin= fread(fid,1,'double'); ymin= fread(fid,1,'double');
-dx= fread(fid,1,'double'); dy= fread(fid,1,'double');
-fread(fid,1,'double');fread(fid,1,'double');
-fread(fid,1,'double');
-parm= fread(fid,1,'double');
-fread(fid,4,'*char' )';
-nn= fread(fid,1,'uint32');
-if ny*nx ~= nn/8 ; error('error') ;end
-T= nan(nx,ny);
-T(1:end) = fread(fid,numel(T),'double');
-T=T';
-fclose(fid);
-T(T==parm) = nan;
-xv = xmin + (0:nx-1)*dx;
-yv = ymin + (0:ny-1)*dy;
-[x,y]=meshgrid(xv,yv);
-xmax=xv(end);
-ymax=yv(end);
-end
-%%%%%%%%%%read XYZ gridded data (*.dat)
-function [T,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrdatfile_Callback(k)
-data=load(k);
-x=data(:,1);y=data(:,2);T=data(:,3); 
-unix=unique(x);xmin=unix(1);xmax=unix(end);dx=unix(2)-unix(1);
-uniy=unique(y);ymin=uniy(1);ymax=uniy(end);dy=uniy(2)-uniy(1);
-nx=numel(unix);
-ny=numel(uniy);
-if x(2)==x(1);
-T=reshape(T,ny,nx);
-x=reshape(x,ny,nx);
-y=reshape(y,ny,nx);
-else
-T=reshape(T,nx,ny);
-x=reshape(x,nx,ny);
-y=reshape(y,nx,ny);
-T=T';x=x';y=y';
-end
-end
-
-function mapper(x,y,matrix,unitt,tit,index) %%map viewer
-if index==1;
-contourf(x,y,matrix,18);shading flat;
-rotate3d off;
-end
-set(gca,'FontSize',10,'FontWeight','bold')
-h=colorbar('eastoutside');title(h,unitt,'FontWeight','bold');
-set(h,'FontSize',10,'FontWeight','bold')
-xlabel('X (Km)');ylabel('Y (Km)');title(tit)
-axis equal
-axis tight
-end
-
-
-%%%%%%%%%%% Function for output of a GRID
 function grdout(matrix,xmin,xmax,ymin,ymax,namefile)
-%Get grid dimensions
+% saves output as grid format (*.grd)
+% Get grid dimensions
 aux=size(matrix);
 nx=aux(2);ny=aux(1);
 grdfile=fopen(namefile,'w');                % Open file
@@ -1239,8 +1156,10 @@ end
 fclose(grdfile);
 end
 
-%%%Grid info List Box
-function list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,k)
+%%%%%%%%%%%%%%%%%%%%%%%%% Table print tasks %%%%%%%%%%%%%%%%%%%%%%%%%
+function list1w(T,nx,ny,xmin,xmax,ymin,ymax,dx,dy,k) 
+% wites the mesh information of loaded data, as well as root of file 
+% to the listbox located at the left upper part of the main GUI window. 
 set(findobj(gcf,'Tag','listb1'),'value',1);
 s0='Grid Info:';
 s1=['Source : ' k];
@@ -1253,198 +1172,13 @@ str={s0;s1;s2;s3;s4;s5;s6};
 set(findobj(gcf,'Tag','listb1'),'string',str);
 end
 
-function [Prad,w]=calcrad2(X)
-% Calculates the radially-averaged power spectrum
-% (RAPS) of the data in the array X
-% Notes: Uses pergram2.m and fcoef
-% By Thomas A. Ridsdill-Smith (March 2000)
-% Ridsdill-Smith, T.A., 2000. The application of the wavelet transform to the processing
-% of aeromagnetic data. Ph. D. Dissertation, The University of Western Australia,
-% Australia, 197pp.
-sz=size(X);
-nmin=min(sz);
-fX=fft2(X);
-% Calculate periodogram
-P=pergram2(fX,sz(1),sz(2));
-% Radially average
-w=fcoef1(nmin);
-w=w(1:floor(nmin/2)+1);
-wbin=round((nmin*w)./(2*pi));
-for k=0:(0.5*nmin) % Don't want to go past Nyquist
-   Prad(k+1)=mean(mean(P(find(wbin==k))));
-end
-
-end
-
-function [P,r]=pergram2(fx,M,N)
-% Calculates the periodogram P of the discrete Fourier 
-% transform fx at the frequencies fi and fj (2D Algorithm)
-% By Thomas A. Ridsdill-Smith (March 2000)
-% Ridsdill-Smith, T.A., 2000. The application of the wavelet transform to the processing
-% of aeromagnetic data. Ph. D. Dissertation, The University of Western Australia,
-% Australia, 197pp.
-
-% Setup frequencies
-fi=[0:(floor(M/2))].*(2*pi/M);
-fj=[0:(floor(N/2)) (-(floor(N/2))+1):-1].*(2*pi/N);
-[xi,yi]=meshgrid(fj,fi);
-r=sqrt(xi.^2+yi.^2);
-% Initialise P
-P=zeros((floor(M/2))+1,N);
-% Calculate power
-modfx2=(abs(fx)).^2;
-for j=1:N
-   P(1,j)=modfx2(1,j);             % Zero wavenumber (row)
-   P(floor(M/2)+1,j)=modfx2(floor(M/2)+1,j); % Nyquist
-   for i=2:(floor(M/2))
-      P(i,j)=modfx2(i,j)+modfx2(M-i+2,j);
-      % Sum positive and negative frequencies
-   end
-end
-
-%P=(1/((N*M)^2))*P; %normalize or not
-P=P';
-P = P(:,2:end);
-end
-
-function [w]=fcoef1(n)
-% Calculates the 1D Fourier angular frequencies
-% (in radians) for a signal of length n
-% (eg w=[(0:(n/2))(((-n/2)+1):-1)].*(2*pi/n) )
-% By Thomas A. Ridsdill-Smith (March 2000)
-% Ridsdill-Smith, T.A., 2000. The application of the wavelet transform to the processing
-% of aeromagnetic data. Ph. D. Dissertation, The University of Western Australia,
-% Australia, 197pp.
-
-if (rem(n,2)==0)
-   % Even signal length
-   w=[(0:(n/2)) (((-n/2)+1):-1)].*(2*pi/n);
-else
-   % Odd signal length
-   w=[(0:((n-1)/2)) ((-(n-1)/2):-1)].*(2*pi/(n-1));
-end
-end
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function createAnom (src,event)
-figure2 = findobj('Type','figure','name','Action');
-delete (figure2);
-fig2 = figure('MenuBar','none','Name','Action',...
-'NumberTitle','off','Resize','off',...
-'Color','w',...
-'units','normalized','outerposition',[.5 .1 .49 .9],...
-'DockControls','off');
-uimenu('Parent',fig2,'Label','Load Depth Grid','CallBack',@impordep);
-uimenu('Parent',fig2,'Label','Settings & Calc','CallBack',@calcmag);
-sm=uimenu('Parent',fig2,'Label','Plot','Tag','swiftm','Enable','off');
-uimenu('Parent',sm,'Label','Depth Model','CallBack',@switcmap1);
-uimenu('Parent',sm,'Label','Calc-Mag','CallBack',@switcmap2);
-set(fig2,'WindowButtonDownFcn', @saveforward)
-axes('Parent',fig2,'units','normalized','Position',[0.15 0.1 0.75 0.75]);
+function instat(h_old,z0,nxe,nye,nx0,ny0,istep) 
+% instant display of the maximum/minimum/mean depth and the current 
+% step of iteration during the on-going iterative procedure 
+% (in the table in outputs GUI)  
+z=h_old+z0;
+z=z(nye/2+1:nye/2+ny0,nxe/2+1:nxe/2+nx0);
 drawnow
-plot(.5,.5,'w+')
-text(0.0,0.8,{'1. Load depth model grid file (*.grd)';' ';' ';...
-              '2. Set model parameters....'; '  ';' ';...
-              '3. Click on desired maps for exporting as image file and data'})
-axis off
-axis off
-end
-
-function impordep(src,event)
-[filename, pathname] = uigetfile('*.grd', 'Import Golden Software Binary/Text grid (*.grd)');
-k=[pathname filename];
-if ischar(k)
-fidc=fopen(k);
-header= fread(fidc,4,'*char' )';
-fclose(fidc);
-c1=strcmp(header,'DSAA');
-c2=strcmp(header,'DSRB');
-sumc=sum([c1 c2]);
-if sumc>0
-switch c1
-    case 1
-[z,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd6txt(k);
-    case 0
-[z,x,y,nx,ny,xmin,xmax,ymin,ymax,dx,dy]=lodgrd7bin(k);        
-end
-z=abs(z);
-if dx~=dy;msgbox('grid interval dx=dy required...');return;end
-mpstyle=1;
-save('magbinvForw.mat','z','x','y','nx','ny','dx','dy','xmin','xmax','ymin','ymax','mpstyle');
+set(findobj(gcf,'Tag','tabl2'),'Data',[max(z(:)) min(z(:)) mean(z(:)) istep])
 drawnow
-plot(.5,.5,'k+')
-axis off
-mapper(x,y,-z,'Km','Depth Model',1)
-set(findobj(gcf,'Tag','swiftm'),'Enable','off');
-end
-end
-end
-
-function calcmag(src,event)
-prompt = {'Inc. angle of ambient field (Incf)?'; 'Dec. angle of ambient field (Df)?';...
-    'Inc. angle of magnetization(Im) ?'; 'Dec. angle of magnetization(Dm)?';...
-'Magnetization Contrast (M)?';
-'Average interface depth Z0 (unit in Km)?'};
-dlg_title = 'parameters';
-num_lines = 1;
-def = {'';'';'';'';'2';'15'};
-answer= inputdlg(prompt,dlg_title,num_lines,def);
-if numel(answer)>0
-If=str2num(cell2mat(answer(1)))*pi/180;
-Df=str2num(cell2mat(answer(2)))*pi/180;
-Im=str2num(cell2mat(answer(3)))*pi/180;
-Dm=str2num(cell2mat(answer(4)))*pi/180;
-M=str2num(cell2mat(answer(5)));
-z0=abs(str2num(cell2mat(answer(6))));
-load('magbinvForw.mat');
-alpha=0;
-Tcalc=forwardmag(z,nx,ny,dx,dy,M,Im,If,Dm,Df,alpha,z0);
-drawnow
-plot(.5,.5,'k+')
-axis off
-mapper(x,y,Tcalc,'nT','Calculated Anomaly From Depth Model',1)
-mpstyle=2;
-save('magbinvForw.mat','Tcalc','mpstyle','-append')
-set(findobj(gcf,'Tag','swiftm'),'Enable','on');
-end
-end
-
-function saveforward(src,event)
-clc;clear all;clear global
-[filename, pathname] = uiputfile('*.png','Set a filename');
-kk=[pathname filename];
-if ischar(kk)
-print(kk, '-dpng', '-r500');
-drawnow
-plot(.5,.5,'w+')
-axis off
-load('magbinvForw.mat');
-
-if mpstyle==2;
-grdout(Tcalc,xmin,xmax,ymin,ymax,[kk '-Tcalc.grd']);
-text(.1,.6,'Calculated magnetic anomaly is exported as image and *.grd file',...
-'Color','b')
-else
-text(.1,.6,' Depth model is exported as image file','Color','b')
-end
-end
-end
-
-function switcmap1 (src,event)
-drawnow
-plot(.5,.5,'k+')
-axis off
-load('magbinvForw.mat');
-mapper(x,y,-z,'Km','Depth Model',1)
-mpstyle=1;
-save('magbinvForw.mat','mpstyle','-append')
-end
-
-function switcmap2 (src,event)
-drawnow
-plot(.5,.5,'k+')
-axis off
-load('magbinvForw.mat');
-mapper(x,y,Tcalc,'nT','Calculated Anomaly From Depth Model',1)    
-mpstyle=2;
-save('magbinvForw.mat','mpstyle','-append')
 end
